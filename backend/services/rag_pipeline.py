@@ -7,6 +7,8 @@ import logging
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+
 from services.document_loader import DocumentLoader
 from services.embeddings import EmbeddingsService
 from services.vector_store import VectorStoreService
@@ -14,6 +16,7 @@ from services.llm_service import LLMService
 from services.retrieval_optimizer import RetrievalOptimizer
 from logger import get_logger
 from config import get_settings
+from domain_templates import get_template
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -55,23 +58,30 @@ class RAGPipeline:
         collection_name: str = "default",
         api_key: Optional[str] = None,
         system_role: Optional[str] = None,
+        domain: Optional[str] = None,
         enable_advanced_retrieval: bool = True,
         vector_weight: float = 0.7,
         keyword_weight: float = 0.3
     ):
         """
         Initialize the RAG pipeline.
-        
+
         Args:
             collection_name: Name of the vector store collection
             api_key: Groq API key (optional, uses settings if not provided)
             system_role: System role for LLM responses (e.g., "university advisor")
+            domain: Vertical key (telecom/university/generic) driving domain
+                    template defaults (normalization context, few-shot examples)
             enable_advanced_retrieval: Enable advanced retrieval optimization
             vector_weight: Weight for vector search in hybrid (0-1)
             keyword_weight: Weight for keyword search in hybrid (0-1)
         """
         self.collection_name = collection_name
-        self.system_role = system_role or "helpful assistant"
+        # Domain template drives normalization context + few-shot examples so
+        # each vertical answers in-character with no cross-domain bleed.
+        self.domain = domain or "generic"
+        self.domain_template = get_template(self.domain)
+        self.system_role = system_role or self.domain_template.persona
         self.enable_advanced_retrieval = enable_advanced_retrieval
         
         # Initialize all services
@@ -93,7 +103,538 @@ class RAGPipeline:
             logger.info("Advanced retrieval optimization DISABLED")
         
         logger.info(f"RAGPipeline initialized for collection: {collection_name}")
+
+    # Common greetings / pleasantries that should NOT trigger document retrieval.
+    _SMALLTALK = {
+        "hi", "hii", "hiii", "hello", "helo", "hey", "heyy", "yo", "hiya",
+        "good morning", "good afternoon", "good evening", "gm", "ge",
+        "thanks", "thank you", "thankyou", "thx", "ty", "cheers",
+        "ok", "okay", "cool", "nice", "great", "bye", "goodbye", "see you",
+        "how are you", "how are you?", "whatsup", "what's up", "sup",
+    }
+
+    def _is_smalltalk(self, message: str) -> bool:
+        """True for short greetings/pleasantries with no informational intent."""
+        if not message:
+            return True
+        text = message.strip().lower().rstrip("!.?")
+        if text in self._SMALLTALK:
+            return True
+        # Very short (1-2 words) and starts with a greeting token.
+        words = text.split()
+        if len(words) <= 2 and words and words[0] in {
+            "hi", "hello", "hey", "yo", "thanks", "thank", "bye", "hiya", "sup"
+        }:
+            return True
+        return False
+
+    # Signals worth running the (paid) emotion classifier for. Plain neutral
+    # questions have none of these, so we skip the extra call.
+    _EMOTION_SIGNAL_WORDS = (
+        "useless", "terrible", "worst", "ridiculous", "annoy", "frustrat", "angry",
+        "unacceptable", "complaint", "complain", "refund", "cancel", "manager",
+        "human", "agent", "supervisor", "speak to", "talk to", "real person",
+        "stupid", "hate", "sick of", "fed up", "waste", "scam", "cheat", "rip off",
+        "not working", "doesn't work", "still not", "again", "third time", "3rd time",
+        "urgent", "asap", "immediately", "disappointed", "poor service", "never",
+        "fk", "wtf", "damn", "shit", "hell",
+    )
+
+    def _needs_emotion_check(self, message: str) -> bool:
+        """Cheap heuristic: only classify emotion when the message shows signals."""
+        if not message:
+            return False
+        text = message.lower()
+        if any(w in text for w in self._EMOTION_SIGNAL_WORDS):
+            return True
+        # Emphatic punctuation
+        if "!!" in message or "??" in message or "?!" in message or message.count("!") >= 2:
+            return True
+        # An ALL-CAPS word (shouting), 4+ letters
+        for word in message.split():
+            stripped = "".join(ch for ch in word if ch.isalpha())
+            if len(stripped) >= 4 and stripped.isupper():
+                return True
+        return False
+
+    def rebuild_bm25_index(self) -> None:
+        """Rebuild the BM25 keyword index from the loaded collection's documents.
+
+        BM25 lives in memory and is only built at index time; when a pipeline is
+        lazy-loaded from disk it must be rebuilt or hybrid search silently
+        degrades to vector-only.
+        """
+        if not self.retrieval_optimizer:
+            return
+        try:
+            collection = self.vector_store.collections.get(self.collection_name)
+            docs = (collection or {}).get('documents', [])
+            if docs:
+                self.retrieval_optimizer.build_bm25_index(
+                    collection_name=self.collection_name,
+                    documents=docs,
+                    doc_ids=list(range(len(docs))),
+                )
+                logger.info(f"Rebuilt BM25 index for {self.collection_name} ({len(docs)} docs)")
+        except Exception as e:
+            logger.warning(f"Could not rebuild BM25 index for {self.collection_name}: {e}")
+
+    # ===================== AGENTIC ANSWERING =====================
+
+    def _retrieve_context(
+        self,
+        query: str,
+        top_k: int = 4,
+        use_hybrid_search: bool = True,
+        use_reranking: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Relevance-gated retrieval used as the agent's search tool.
+
+        Returns a list of relevant docs, or an EMPTY list when nothing is
+        genuinely relevant (so the agent can honestly say 'I don't have that'
+        instead of being force-fed an off-topic document).
+        """
+        try:
+            query_embedding = self.embeddings_service.embed_text(query)
+            initial_k = top_k * 10 if (self.retrieval_optimizer and (use_hybrid_search or use_reranking)) else top_k
+            results = self.vector_store.query(
+                collection_name=self.collection_name,
+                query_embeddings=[query_embedding],
+                n_results=initial_k,
+            )
+            if not (results and results.get('documents') and results['documents'][0]):
+                return []
+
+            texts = results['documents'][0]
+            metas = (results.get('metadatas') or [[]])[0]
+            dists = (results.get('distances') or [[]])[0]
+
+            retrieved = []
+            for i, text in enumerate(texts):
+                meta = metas[i] if i < len(metas) else {}
+                if meta.get('content_type') == 'question':
+                    continue
+                retrieved.append({
+                    'text': text,
+                    'metadata': meta,
+                    'distance': float(dists[i]) if i < len(dists) else 0.0,
+                    'doc_id': i,
+                })
+            if not retrieved:
+                return []
+
+            # Relevance gate: if even the closest match is too far, nothing is relevant.
+            best = min(d['distance'] for d in retrieved)
+            if best > settings.hard_distance_cutoff:
+                logger.info(f"Search '{query[:40]}': best distance {best:.3f} > cutoff; no relevant context")
+                return []
+
+            filtered = [d for d in retrieved if d['distance'] <= settings.distance_threshold]
+            if not filtered:
+                filtered = sorted(retrieved, key=lambda x: x['distance'])[:settings.min_results_after_filter]
+
+            # Hybrid + rerank for precision
+            if self.retrieval_optimizer and (use_hybrid_search or use_reranking):
+                try:
+                    optimized, _ = self.retrieval_optimizer.optimize_retrieval(
+                        collection_name=self.collection_name,
+                        query=query,
+                        vector_results=filtered,
+                        llm_service=self.llm_service,
+                        use_hybrid=use_hybrid_search,
+                        use_reranking=use_reranking,
+                        use_query_rewriting=False,
+                        use_hyde=False,
+                        top_k_initial=50,
+                        top_k_final=top_k,
+                    )
+                    filtered = optimized
+                except Exception as e:
+                    logger.warning(f"Optimization failed, using vector results: {e}")
+
+            return filtered[:top_k]
+        except Exception as e:
+            logger.warning(f"Retrieval error for '{query[:40]}': {e}")
+            return []
+
+    def _agent_system_prompt(self) -> str:
+        """Lean agent prompt: persona + genuine capability boundaries (no case-patches)."""
+        return f"""You are {self.system_role}
+
+🌐 LANGUAGE (very important):
+- Reply in the customer's language. If their latest message is in Sinhala script (සිංහල) or in romanized Sinhala ("Singlish", e.g. "mata plan eka gana danaganna oney"), reply in natural, fluent Sinhala script. If it is in Tamil script (தமிழ்) or romanized Tamil, reply in natural, fluent Tamil script. If it is in English, reply in English. Never switch the language on the customer.
+- BUT always write your search_knowledge_base queries in ENGLISH — the knowledge base is in English. Translate the customer's need into a focused English query, even when the conversation is in Sinhala or Tamil. Then answer them back in their own language.
+
+You are a customer-care agent. Operate by these principles:
+
+- Use the search_knowledge_base tool for ANY question about products, plans, prices, policies, features, coverage, or how to do something ("how do I…", "can I…", "what is…"). When unsure whether we cover it, SEARCH FIRST rather than giving generic advice. Base every factual claim ONLY on what the tool returns.
+- If a search returns no relevant information, tell the customer you don't have that detail and offer to connect them to a human. NEVER invent prices, policies, or facts.
+- You have action tools to actually HELP: log tickets/requests, schedule callbacks, check the status of an existing ticket/request by its reference number, look up an account, and make account changes. Use them when the customer wants something done — including checking progress of something already logged. Collect the details a tool needs (ask for anything missing) before calling it. When a tool returns a reference number, give it to the customer.
+- You can look up or change an account ONLY through the account tools, and ONLY when the customer provides an identifier (phone number / email / account or application ID). NEVER invent, assume, or guess account details — if you don't have the tool result, you don't know it. Before making any CHANGE to an account, state the exact change and get the customer's clear confirmation ("yes") first.
+- For greetings, thanks, or small talk, reply warmly and briefly — do NOT search or call tools.
+- If the customer reports a vague problem ("it's not working", "I have an issue"), ask what specifically is wrong (calls, data, texts?) BEFORE troubleshooting — don't guess.
+- Answer ONLY what was asked. Be concise: lead with the key points, then offer more. Don't dump unrelated details.
+- Be warm, confident, and human. Use short paragraphs and bullet points (•) when listing."""
+
+    # Tool schema exposed to the model (OpenAI function-calling format).
+    _AGENT_TOOLS = [{
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": (
+                "Search the company knowledge base for facts needed to answer the "
+                "customer (plans, prices, policies, features, coverage, procedures). "
+                "Do NOT call this for greetings, thanks, or small talk."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A focused search query for what to look up",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }]
+
+    _ESCALATE_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "escalate_to_human",
+            "description": (
+                "Hand this conversation off to a human agent. Use when the customer is "
+                "very upset or angry, explicitly asks for a human/manager, or you cannot "
+                "resolve their issue. Provide a short reason and a one-paragraph summary "
+                "of the customer's issue for the human agent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "Short reason for escalation"},
+                    "summary": {"type": "string", "description": "One-paragraph summary of the issue for the human agent"},
+                },
+                "required": ["reason"],
+            },
+        },
+    }
+
+    @property
+    def client_slug(self) -> str:
+        if self.collection_name.startswith("client_"):
+            return self.collection_name[len("client_"):]
+        return self.collection_name
+
+    def _mood_directive(self, emotion: Dict[str, Any]) -> str:
+        """Turn a detected mood into tone guidance appended to the agent prompt."""
+        e = (emotion or {}).get("emotion", "neutral")
+        i = (emotion or {}).get("intensity", 1)
+        wants_human = (emotion or {}).get("wants_human", False)
+        lines = []
+        if e == "angry":
+            lines.append("The customer sounds ANGRY. Open with a sincere, brief apology. Stay calm and non-defensive. Focus entirely on resolving their issue. Do not be cheerful or salesy.")
+        elif e == "frustrated":
+            lines.append("The customer sounds FRUSTRATED. Acknowledge their frustration, be extra clear and efficient, and don't make them repeat themselves.")
+        elif e == "confused":
+            lines.append("The customer sounds CONFUSED. Slow down, explain simply and step by step, and check they're following.")
+        elif e == "happy":
+            lines.append("The customer is in a good mood — match their warmth.")
+        if wants_human:
+            lines.append("The customer explicitly asked for a human — call the escalate_to_human tool NOW (write a short summary of the conversation), then warmly tell them a human agent will follow up. Do not just ask for more details first.")
+        elif e in ("angry", "frustrated") and i >= 4:
+            lines.append("If you cannot fully resolve this, sincerely offer to connect them to a human agent and use the escalate_to_human tool.")
+        if not lines:
+            return ""
+        return "\n\nCUSTOMER MOOD (adapt your tone):\n- " + "\n- ".join(lines)
+
+    def _record_escalation(self, reason, summary, emotion, conversation_history, message) -> None:
+        """Persist a human-handoff record with a transcript snippet."""
+        try:
+            from database import SessionLocal
+            from services.client_store import create_escalation
+            transcript = [f"{m.get('role')}: {m.get('content')}" for m in (conversation_history or [])[-8:]]
+            transcript.append(f"user: {message}")
+            db = SessionLocal()
+            try:
+                create_escalation(
+                    db,
+                    client_slug=self.client_slug,
+                    reason=reason,
+                    summary=summary or "",
+                    emotion=(emotion or {}).get("emotion"),
+                    intensity=(emotion or {}).get("intensity"),
+                    transcript="\n".join(transcript),
+                )
+            finally:
+                db.close()
+            logger.info(f"Escalation recorded for {self.client_slug}: {reason}")
+        except Exception as e:
+            logger.warning(f"Failed to record escalation: {e}")
+
+    def agent_chat(
+        self,
+        message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        top_k: int = 4,
+        max_iterations: int = 3,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Agentic answering: the model reasons and decides when to search the
+        knowledge base. Falls back to a direct grounded answer if the model
+        produces a malformed tool call (smaller models occasionally do), so the
+        customer never sees an error.
+        """
+        conversation_history = conversation_history or []
+        if self.llm_service.llm is None:
+            return {'answer': "The assistant is temporarily unavailable.", 'sources': [],
+                    'used_retrieval': False, 'emotion': {'emotion': 'neutral', 'intensity': 1}, 'escalated': False}
+
+        # Detect the customer's mood — but only when it's worth a call. Small talk
+        # and plainly neutral questions skip the classifier entirely (saves ~1
+        # LLM call/turn); we only classify when the message shows emotional signals.
+        if self._is_smalltalk(message) or not self._needs_emotion_check(message):
+            emotion = {"emotion": "neutral", "intensity": 1, "wants_human": False}
+        else:
+            emotion = self.llm_service.detect_emotion(message)
+
+        try:
+            result = self._run_agent_loop(message, conversation_history, top_k, max_iterations, emotion, session_id)
+        except Exception as e:
+            logger.warning(f"Agent loop failed ({e}); using direct fallback")
+            result = self._fallback_answer(message, conversation_history, top_k)
+
+        result['emotion'] = emotion
+        result.setdefault('escalated', False)
+        result.setdefault('no_kb_match', False)
+
+        # Safety net: an explicit request for a human always creates a handoff,
+        # even if the model didn't call the escalate tool itself.
+        if emotion.get('wants_human') and not result.get('escalated'):
+            self._record_escalation(
+                reason="Customer explicitly requested a human agent",
+                summary=f"Customer asked to speak with a human. Latest message: {message}",
+                emotion=emotion,
+                conversation_history=conversation_history,
+                message=message,
+            )
+            result['escalated'] = True
+
+        return result
+
+    def _fallback_answer(self, message, conversation_history, top_k=4) -> Dict[str, Any]:
+        """Direct retrieve-then-answer path when the agent model is unavailable.
+
+        Relevance-gated and restrained so it doesn't over-share like a dumb RAG:
+        greetings/thanks get no retrieval, and it never volunteers unasked info.
+        """
+        if self._is_smalltalk(message):
+            docs = []
+        else:
+            # Translate the query to the KB language (English) so Sinhala/Singlish
+            # messages still retrieve — retrieval uses the converted query, the
+            # answer below still uses the customer's original message + language.
+            search_query = message
+            if self.retrieval_optimizer:
+                search_query = self.retrieval_optimizer.normalize_and_enhance_query(
+                    query=message,
+                    llm_service=self.llm_service,
+                    domain_context=self.domain_template.normalization_context,
+                )
+            docs = self._retrieve_context(search_query, top_k=top_k)
+        context = [d['text'] for d in docs] if docs else None
+        system_prompt = (
+            f"You are {self.system_role}. Answer ONLY the customer's exact question. "
+            "Reply in the customer's language: if their message is in Sinhala or romanized "
+            "Sinhala (Singlish), reply in natural Sinhala script; if in Tamil or romanized "
+            "Tamil, reply in natural Tamil script; if in English, reply in English. "
+            "Base facts strictly on the provided context; if there is no context, do NOT invent "
+            "anything. NEVER volunteer plans, prices, products, or details the customer did not "
+            "ask about. For greetings or thanks, just reply warmly in one line and ask how you can "
+            "help — do not mention any plan. If the answer isn't in the context, say you don't have "
+            "that detail and offer a human agent. You cannot access the customer's personal account, "
+            "plan, or number — never claim to. Be concise and warm."
+        )
+        # Use the cheap utility model for the fallback so customers still get an
+        # answer even when the main model is rate-limited or misfires.
+        answer = self.llm_service.generate_response(
+            query=message,
+            context=context,
+            system_prompt=system_prompt,
+            conversation_history=conversation_history[-6:] if conversation_history else None,
+            lightweight=True,
+        )
+        return {
+            'answer': self.llm_service._clean_citation_phrases(answer),
+            'sources': self._format_sources_for_citations(docs) if docs else [],
+            'used_retrieval': bool(docs),
+            'no_kb_match': (not self._is_smalltalk(message)) and not docs,
+        }
+
+    @staticmethod
+    def _msg_text(content: Any) -> str:
+        """Normalize LLM message content to a string (Gemini returns a list of parts)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, str):
+                    parts.append(p)
+                elif isinstance(p, dict):
+                    parts.append(p.get("text") or p.get("content") or "")
+            return "".join(parts)
+        return str(content) if content is not None else ""
+
+    def _run_agent_loop(
+        self,
+        message: str,
+        conversation_history: List[Dict[str, str]],
+        top_k: int,
+        max_iterations: int,
+        emotion: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from services import actions
+        # Agent gets search + escalate + this domain's transactional actions.
+        domain = getattr(self, "domain", "generic")
+        llm_with_tools = self.llm_service.llm.bind_tools(
+            [self._AGENT_TOOLS[0], self._ESCALATE_TOOL] + actions.get_action_tools(domain)
+        )
+        system_prompt = self._agent_system_prompt() + self._mood_directive(emotion)
+
+        messages: List[Any] = [SystemMessage(content=system_prompt)]
+        for m in conversation_history[-6:]:
+            role, content = m.get('role'), m.get('content', '')
+            if role == 'user':
+                messages.append(HumanMessage(content=content))
+            elif role == 'assistant':
+                messages.append(AIMessage(content=content))
+        messages.append(HumanMessage(content=message))
+
+        collected: List[Dict[str, Any]] = []
+        escalated = False
+        search_attempted = False
+
+        for _ in range(max_iterations):
+            ai_msg = llm_with_tools.invoke(messages)
+            messages.append(ai_msg)
+            tool_calls = getattr(ai_msg, 'tool_calls', None) or []
+
+            if not tool_calls:
+                answer = self._msg_text(ai_msg.content).strip() or "Could you rephrase that?"
+                return {
+                    'answer': self.llm_service._clean_citation_phrases(answer),
+                    'sources': self._format_sources_for_citations(collected) if collected else [],
+                    'used_retrieval': bool(collected),
+                    'escalated': escalated,
+                    'no_kb_match': search_attempted and not collected,
+                }
+
+            for tc in tool_calls:
+                name = tc.get('name')
+                args = tc.get('args', {}) or {}
+                tc_id = tc.get('id')
+                if name == 'search_knowledge_base':
+                    search_attempted = True
+                    q = (args.get('query') or message).strip()
+                    docs = self._retrieve_context(q, top_k=top_k)
+                    collected.extend(docs)
+                    if docs:
+                        tool_text = "\n\n---\n\n".join(d['text'] for d in docs)
+                    else:
+                        tool_text = "No relevant information was found in the knowledge base for this query."
+                    messages.append(ToolMessage(content=tool_text, tool_call_id=tc_id))
+                elif name == 'escalate_to_human':
+                    reason = (args.get('reason') or "Customer needs human assistance").strip()
+                    summary = (args.get('summary') or "").strip()
+                    self._record_escalation(reason, summary, emotion, conversation_history, message)
+                    escalated = True
+                    messages.append(ToolMessage(
+                        content=("Escalation created — a human agent has been notified and will follow up. "
+                                 "Warmly reassure the customer that a human will reach out."),
+                        tool_call_id=tc_id,
+                    ))
+                elif actions.is_action(domain, name):
+                    result_text = actions.execute_action(
+                        self.client_slug, session_id, name, args, domain
+                    )
+                    messages.append(ToolMessage(content=result_text, tool_call_id=tc_id))
+                else:
+                    messages.append(ToolMessage(content="Unknown tool.", tool_call_id=tc_id))
+
+        # Hit the iteration cap — force a final answer using what we have.
+        final = self.llm_service.llm.invoke(messages)
+        return {
+            'answer': self.llm_service._clean_citation_phrases(self._msg_text(final.content).strip() or "Let me connect you with a human agent."),
+            'sources': self._format_sources_for_citations(collected) if collected else [],
+            'used_retrieval': bool(collected),
+            'escalated': escalated,
+            'no_kb_match': search_attempted and not collected,
+        }
     
+    def draft_kb_entry(self, questions: List[str]) -> Dict[str, str]:
+        """Draft a KB card answering a cluster of unanswered questions (on-demand LLM call).
+
+        The draft is a STARTING POINT — it uses [SPECIFY] placeholders for facts it
+        doesn't know, which the operator fills/verifies before approving.
+        """
+        import json
+        import re
+        qlist = "\n".join(f"- {q}" for q in questions[:8])
+        system = (
+            "You help build a customer-support knowledge base. Given questions customers asked "
+            "that we could NOT answer, draft ONE concise knowledge-base entry that would answer them. "
+            "Respond with ONLY JSON: {\"title\": \"...\", \"content\": \"...\"}. "
+            "Write clear, helpful content. For any specific fact you cannot know (prices, numbers, "
+            "policies, dates), insert a [SPECIFY] placeholder — do NOT invent specifics. "
+            "The human operator will fill placeholders and verify before publishing."
+        )
+        try:
+            answer = self.llm_service.generate_response(
+                query=f"Questions we couldn't answer:\n{qlist}",
+                system_prompt=system,
+            )
+            m = re.search(r"\{.*\}", answer, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
+            return {
+                "title": str(data.get("title", "")).strip() or (questions[0] if questions else "New topic"),
+                "content": str(data.get("content", "")).strip(),
+            }
+        except Exception as e:
+            logger.warning(f"draft_kb_entry failed: {e}")
+            return {"title": questions[0] if questions else "New topic", "content": ""}
+
+    def add_kb_entry(self, title: str, content: str, tags: Optional[List[str]] = None) -> int:
+        """Ingest a single approved KB card into this client's collection. Returns chunk count."""
+        import json
+        import os
+        import tempfile
+        card = {
+            "title": title,
+            "category": "learned",
+            "tags": tags or [],
+            "content": content,
+        }
+        tmp_dir = tempfile.mkdtemp()
+        tmp_path = os.path.join(tmp_dir, "kb_entry.json")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump([card], f)
+            result = self.index_documents(
+                file_paths=[tmp_path],
+                metadata={"category": "learned", "doc_type": "learned"},
+            )
+            return result.get("chunks_created", result.get("total_chunks", 0)) if isinstance(result, dict) else 0
+        finally:
+            try:
+                os.remove(tmp_path)
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+
     def index_documents(
         self,
         pdf_paths: List[str] = None,
@@ -351,7 +892,7 @@ class RAGPipeline:
                 query=question,
                 llm_service=self.llm_service,
                 conversation_history=None,
-                domain_context="CV and education documents"
+                domain_context=self.domain_template.normalization_context
             )
             if normalized_query != question:
                 optimization_metadata['transformations'].append('normalization')
@@ -489,7 +1030,7 @@ class RAGPipeline:
                     logger.info(f"Applied optimization: {opt_meta['transformations']}")
         
         # Step 5: Retrieve parent chunks if using parent-child strategy
-        if retrieved_docs and any(doc['metadata'].get('has_parent') for doc in retrieved_docs):
+        if retrieved_docs and any(doc.get('metadata', {}).get('has_parent') for doc in retrieved_docs):
             retrieved_docs = self._retrieve_parent_chunks(retrieved_docs)
             logger.info("Replaced child chunks with parent chunks for full context")
         
@@ -663,7 +1204,7 @@ class RAGPipeline:
         seen_parents = set()
         
         for doc in child_docs:
-            parent_id = doc['metadata'].get('parent_id')
+            parent_id = doc.get('metadata', {}).get('parent_id')
             if not parent_id or parent_id in seen_parents:
                 # No parent or already retrieved, keep original
                 if parent_id not in seen_parents:
@@ -678,7 +1219,7 @@ class RAGPipeline:
                 parent_filter = {'parent_id': parent_id, 'chunk_type': 'parent'}
                 results = self.vector_store.query(
                     collection_name=self.collection_name,
-                    query_embeddings=[doc['metadata'].get('embedding', [0.0] * 384)],  # Dummy query
+                    query_embeddings=[doc.get('metadata', {}).get('embedding', [0.0] * 384)],  # Dummy query
                     n_results=1,
                     metadata_filter=parent_filter
                 )
@@ -868,7 +1409,13 @@ class RAGPipeline:
         context = None
         retrieved_docs = None
         optimization_metadata = {'transformations': []}
-        
+
+        # Skip retrieval for greetings / small talk so the assistant simply
+        # greets instead of dumping an unrelated document (e.g. a plan).
+        if use_retrieval and self._is_smalltalk(message):
+            logger.info("Detected greeting/small-talk; skipping retrieval")
+            use_retrieval = False
+
         # Retrieve context if requested
         if use_retrieval:
             try:
@@ -879,7 +1426,7 @@ class RAGPipeline:
                         query=message,
                         llm_service=self.llm_service,
                         conversation_history=conversation_history,
-                        domain_context="CV and education documents"
+                        domain_context=self.domain_template.normalization_context
                     )
                     if normalized_query != message:
                         optimization_metadata['transformations'].append('normalization')
@@ -1012,7 +1559,7 @@ class RAGPipeline:
                                 logger.info(f"Applied optimization: {opt_meta['transformations']}")
                         
                         # Step 4: Retrieve parent chunks if using parent-child
-                        if retrieved_docs and any(doc['metadata'].get('has_parent') for doc in retrieved_docs):
+                        if retrieved_docs and any(doc.get('metadata', {}).get('has_parent') for doc in retrieved_docs):
                             retrieved_docs = self._retrieve_parent_chunks(retrieved_docs)
                             logger.info(f"Retrieved parent chunks for full context")
                         
@@ -1031,7 +1578,9 @@ class RAGPipeline:
         answer = self.llm_service.generate_chat_response(
             query=message,
             conversation_history=limited_history,
-            context=context
+            context=context,
+            system_role=self.system_role,
+            few_shot_examples=self.domain_template.few_shot_examples
         )
         
         # Detect uncertainty in response
@@ -1131,27 +1680,30 @@ class MultiClientRAGPipeline:
         self,
         client_id: str,
         system_role: Optional[str] = None,
+        domain: Optional[str] = None,
         api_key: Optional[str] = None
     ) -> RAGPipeline:
         """
         Create a new RAG pipeline for a client.
-        
+
         Args:
             client_id: Unique identifier for the client
             system_role: Custom system role for this client
+            domain: Vertical key (telecom/university/generic) for template defaults
             api_key: Optional Groq API key
-        
+
         Returns:
             RAGPipeline instance for the client
         """
         if client_id in self.pipelines:
             logger.warning(f"Pipeline for client '{client_id}' already exists")
             return self.pipelines[client_id]
-        
+
         pipeline = RAGPipeline(
             collection_name=f"client_{client_id}",
             api_key=api_key,
-            system_role=system_role
+            system_role=system_role,
+            domain=domain
         )
         
         self.pipelines[client_id] = pipeline
@@ -1172,12 +1724,40 @@ class MultiClientRAGPipeline:
         # If already in memory, return it
         if client_id in self.pipelines:
             return self.pipelines[client_id]
-        
-        # Try to lazy-load from disk
+
+        # Try to lazy-load from disk (client that already has indexed docs)
         if self._load_client_from_disk(client_id):
             return self.pipelines[client_id]
-        
+
+        # Not on disk yet — but it may be a DB client created without documents.
+        # Materialize an empty pipeline from its DB config so uploads/chat work.
+        if self._create_from_db(client_id):
+            return self.pipelines[client_id]
+
         return None
+
+    def _create_from_db(self, client_id: str) -> bool:
+        """Create an empty in-memory pipeline for a DB client with no index yet."""
+        try:
+            from database import SessionLocal
+            from services.client_store import get_client, resolve_persona
+            db = SessionLocal()
+            try:
+                client_row = get_client(db, client_id)
+                if client_row is None:
+                    return False
+                self.create_pipeline(
+                    client_id=client_id,
+                    system_role=resolve_persona(client_row),
+                    domain=client_row.domain,
+                )
+                logger.info(f"Materialized empty pipeline from DB for client: {client_id}")
+                return True
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Could not materialize pipeline from DB for {client_id}: {e}")
+            return False
     
     def delete_pipeline(self, client_id: str) -> bool:
         """
@@ -1253,16 +1833,37 @@ class MultiClientRAGPipeline:
         
         try:
             logger.info(f"Lazy-loading client: {client_id}")
-            
+
+            # Load persona + domain from the DB (source of truth for metadata)
+            client_domain = None
+            client_persona = None
+            try:
+                from database import SessionLocal
+                from services.client_store import get_client, resolve_persona
+                db = SessionLocal()
+                try:
+                    client_row = get_client(db, client_id)
+                    if client_row is not None:
+                        client_domain = client_row.domain
+                        client_persona = resolve_persona(client_row)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Could not load client config from DB for {client_id}: {e}")
+
             # Create pipeline instance
             pipeline = RAGPipeline(
                 collection_name=collection_name,
-                system_role="helpful assistant"
+                system_role=client_persona,
+                domain=client_domain
             )
             
             # Load the persisted collection
             pipeline.vector_store.load_collection(collection_name)
-            
+
+            # Rebuild BM25 so hybrid search works after a reload (it's in-memory only)
+            pipeline.rebuild_bm25_index()
+
             # Add to pipelines dictionary
             self.pipelines[client_id] = pipeline
             

@@ -6,41 +6,113 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 
+# Auth Models
+class LoginRequest(BaseModel):
+    """Operator console login."""
+    email: str = Field(..., description="Operator email")
+    password: str = Field(..., description="Operator password")
+
+
+class RegisterRequest(BaseModel):
+    """Create a new operator account."""
+    email: str
+    password: str = Field(..., min_length=6)
+    name: str = ""
+
+
+class LoginResponse(BaseModel):
+    token: str
+    email: str
+    name: Optional[str] = None
+
+
+class MeResponse(BaseModel):
+    id: int
+    email: str
+    name: Optional[str] = None
+    is_superadmin: bool = False
+
+
+# Domain template metadata (for the create-client domain picker)
+class DomainInfo(BaseModel):
+    key: str
+    display_name: str
+    persona: str
+    bot_name: str
+    greeting: str
+
+
+class DomainListResponse(BaseModel):
+    domains: List[DomainInfo]
+
+
 # Client Management Models
 class ClientCreate(BaseModel):
-    """Request model for creating a new client."""
-    client_id: str = Field(..., description="Unique identifier for the client")
-    description: str = Field(default="", description="Optional description of the client")
-    
+    """Request model for creating a new client (tenant)."""
+    slug: str = Field(..., description="URL-safe unique identifier (used in /c/{slug})")
+    name: str = Field(default="", description="Display name of the client")
+    description: str = Field(default="", description="Optional description")
+    domain: str = Field(default="generic", description="Vertical: telecom | university | generic")
+    persona: Optional[str] = Field(default=None, description="Override persona (defaults to domain template)")
+    bot_name: Optional[str] = Field(default=None, description="Assistant display name")
+    greeting: Optional[str] = Field(default=None, description="Opening greeting shown to customers")
+    accent_color: Optional[str] = Field(default=None, description="Brand accent color (hex)")
+
     class Config:
         json_schema_extra = {
             "example": {
-                "client_id": "university",
-                "description": "University admissions chatbot"
+                "slug": "abc-university",
+                "name": "ABC University",
+                "description": "Admissions & student services",
+                "domain": "university"
             }
         }
+
+
+class ClientUpdate(BaseModel):
+    """Partial update of a client's configuration."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    domain: Optional[str] = None
+    persona: Optional[str] = None
+    bot_name: Optional[str] = None
+    greeting: Optional[str] = None
+    accent_color: Optional[str] = None
+    wa_enabled: Optional[bool] = None
+    wa_phone_number_id: Optional[str] = None
+    wa_access_token: Optional[str] = None
 
 
 class ClientResponse(BaseModel):
     """Response model for client information."""
-    client_id: str
+    slug: str
+    name: str = ""
     description: str = ""
+    domain: str = "generic"
+    persona: Optional[str] = None
+    bot_name: str = "Assistant"
+    greeting: Optional[str] = None
+    accent_color: str = "#4f46e5"
     document_count: int = 0
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "client_id": "university",
-                "description": "University admissions chatbot",
-                "document_count": 15
-            }
-        }
+    wa_enabled: bool = False
+    wa_phone_number_id: Optional[str] = None
 
 
 class ClientListResponse(BaseModel):
     """Response model for listing all clients."""
     clients: List[ClientResponse]
     total: int
+
+
+# Public (customer-facing) models — scoped to a single client, no admin data
+class PublicConfigResponse(BaseModel):
+    """Branding/config the customer page + widget need. No secrets."""
+    slug: str
+    name: str
+    bot_name: str
+    greeting: str
+    accent_color: str
+    domain: str
 
 
 class MessageResponse(BaseModel):
@@ -161,6 +233,7 @@ class ChatRequest(BaseModel):
     """Request model for conversational chat."""
     message: str = Field(..., description="The user's message")
     history: List[ChatMessage] = Field(default=[], description="Previous conversation history")
+    session_id: Optional[str] = Field(default=None, description="Client-generated conversation id")
     use_retrieval: bool = Field(default=True, description="Whether to use document retrieval")
     top_k: int = Field(default=3, ge=1, le=10, description="Number of documents to retrieve")
     use_hybrid_search: bool = Field(default=True, description="Enable hybrid vector+keyword search")
@@ -193,3 +266,100 @@ class ChatResponse(BaseModel):
     response: str
     used_retrieval: bool
     sources: Optional[List[Source]] = None
+    escalated: bool = False
+    emotion: Optional[str] = None
+    interaction_id: Optional[int] = None
+
+
+# Learning-loop models
+class FeedbackRequest(BaseModel):
+    interaction_id: int
+    rating: str = Field(..., description="'up' or 'down'")
+
+
+class InsightsResponse(BaseModel):
+    total_conversations: int
+    total_turns: int
+    deflection_rate: float
+    escalation_rate: float
+    satisfaction_rate: Optional[float] = None
+    thumbs_up: int = 0
+    thumbs_down: int = 0
+    weak_count: int = 0
+    emotion_breakdown: Dict[str, int] = Field(default_factory=dict)
+    top_questions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class GapCluster(BaseModel):
+    representative_question: str
+    count: int
+    examples: List[str]
+
+
+class GapListResponse(BaseModel):
+    gaps: List[GapCluster]
+
+
+class DraftRequest(BaseModel):
+    questions: List[str]
+
+
+class DraftResponse(BaseModel):
+    title: str
+    content: str
+
+
+class KbEntryRequest(BaseModel):
+    title: str
+    content: str
+    tags: Optional[List[str]] = None
+
+
+# Escalation (human handoff) models
+class EscalationResponse(BaseModel):
+    id: int
+    reason: str
+    summary: Optional[str] = None
+    emotion: Optional[str] = None
+    intensity: Optional[int] = None
+    transcript: Optional[str] = None
+    status: str
+    created_at: str
+
+
+class EscalationListResponse(BaseModel):
+    escalations: List[EscalationResponse]
+    open_count: int
+
+
+# Transactional actions
+class ActionResponse(BaseModel):
+    id: int
+    action_type: str
+    kind: str
+    reference: Optional[str] = None
+    payload: Optional[dict] = None
+    result: Optional[str] = None
+    status: str
+    session_id: Optional[str] = None
+    created_at: str
+
+
+class ActionListResponse(BaseModel):
+    actions: List[ActionResponse]
+    open_count: int
+
+
+class ActionStatusRequest(BaseModel):
+    status: str  # open | done
+
+
+class AccountResponse(BaseModel):
+    id: int
+    identifier: str
+    name: Optional[str] = None
+    data: Optional[dict] = None
+
+
+class AccountListResponse(BaseModel):
+    accounts: List[AccountResponse]

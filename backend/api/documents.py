@@ -3,14 +3,19 @@ Document Management Router
 Endpoints for uploading and managing PDF documents for RAG clients
 """
 
-from fastapi import APIRouter, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, status, UploadFile, File, Form, Depends
 from typing import List, Optional
 import tempfile
 import os
 from pathlib import Path
+from sqlalchemy.orm import Session
 
 from api.models import DocumentUploadResponse, DocumentListResponse, DocumentInfo, MessageResponse
 from api.clients import get_pipeline_manager
+from services import client_store
+from database import get_db
+from db_models import User, Client
+from auth import require_admin
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,12 +24,26 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/clients", tags=["documents"])
 
 
+def _owned_doc_client(
+    client_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> Client:
+    """Auth + tenant isolation for the document endpoints (keyed on client_id)."""
+    client = client_store.get_client(db, client_id)
+    if client is None or (client.owner_id != user.id and not user.is_superadmin):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
+    return client
+
+
 @router.post("/{client_id}/documents", response_model=DocumentUploadResponse)
 async def upload_documents(
     client_id: str,
     file: UploadFile = File(..., description="Document file to upload (PDF or JSON)"),
     category: str = Form(default="general", description="Document category"),
-    doc_type: str = Form(default="document", description="Document type")
+    doc_type: str = Form(default="document", description="Document type"),
+    db: Session = Depends(get_db),
+    _owned: Client = Depends(_owned_doc_client),
 ):
     """
     Upload a document to a client's collection.
@@ -106,7 +125,19 @@ async def upload_documents(
             chunks_created = doc_count_after - doc_count_before
             
             logger.info(f"Indexed file, created {chunks_created} chunks")
-            
+
+            # Record the document in the DB so listings are real (not stubbed)
+            try:
+                client_store.add_document(
+                    db,
+                    client_slug=client_id,
+                    filename=file.filename,
+                    doc_type=file_ext.lstrip("."),
+                    chunk_count=chunks_created,
+                )
+            except Exception as e:
+                logger.warning(f"Could not record document row for {client_id}: {e}")
+
             # Extract chunk previews from result
             chunk_previews = result.get('chunk_previews', [])
             logger.info(f"Chunk previews count: {len(chunk_previews)}")
@@ -153,47 +184,43 @@ async def upload_documents(
 @router.get("/{client_id}/documents", response_model=DocumentListResponse)
 async def list_documents(
     client_id: str,
-    limit: int = 10,
-    offset: int = 0
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    _owned: Client = Depends(_owned_doc_client),
 ):
     """
-    List documents in a client's collection.
-    
+    List the files uploaded to a client's knowledge base (from the DB).
+
     - **client_id**: The client to list documents for
     - **limit**: Maximum number of documents to return
     - **offset**: Number of documents to skip
     """
     try:
-        manager = get_pipeline_manager()
-        pipeline = manager.get_pipeline(client_id)
-        
-        if pipeline is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Client '{client_id}' not found"
+        rows = client_store.list_documents(db, client_id)
+        total_docs = len(rows)
+        page = rows[offset:offset + limit]
+
+        documents = [
+            DocumentInfo(
+                chunk_index=doc.id,
+                text_preview=doc.filename,
+                metadata={
+                    "filename": doc.filename,
+                    "doc_type": doc.doc_type,
+                    "chunk_count": doc.chunk_count,
+                    "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+                },
             )
-        
-        stats = pipeline.get_stats()
-        total_docs = stats["document_count"]
-        
-        # For now, return basic info since we don't have a method to list all documents
-        # In a real implementation, you'd query the vector store
-        documents = []
-        
-        # Return limited document info
-        for i in range(offset, min(offset + limit, total_docs)):
-            documents.append(DocumentInfo(
-                chunk_index=i,
-                text_preview="[Document content]",
-                metadata={"note": "Full document listing requires vector store query implementation"}
-            ))
-        
+            for doc in page
+        ]
+
         return DocumentListResponse(
             client_id=client_id,
             total_documents=total_docs,
-            documents=documents
+            documents=documents,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -205,29 +232,36 @@ async def list_documents(
 
 
 @router.delete("/{client_id}/documents", response_model=MessageResponse)
-async def clear_documents(client_id: str):
+async def clear_documents(
+    client_id: str,
+    db: Session = Depends(get_db),
+    _owned: Client = Depends(_owned_doc_client),
+):
     """
     Clear all documents from a client's collection.
-    
+
     - **client_id**: The client to clear documents for
     """
     try:
         manager = get_pipeline_manager()
         pipeline = manager.get_pipeline(client_id)
-        
+
         if pipeline is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Client '{client_id}' not found"
             )
-        
+
         # Get count before clearing
         stats_before = pipeline.get_stats()
         doc_count = stats_before["document_count"]
-        
+
         # Clear collection
         pipeline.clear_collection()
-        
+
+        # Clear document rows from the DB too
+        client_store.clear_documents(db, client_id)
+
         logger.info(f"Cleared {doc_count} documents from client '{client_id}'")
         
         return MessageResponse(

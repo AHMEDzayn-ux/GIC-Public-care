@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { API_BASE } from '../services/api';
 import './VoiceChat.css';
 
 const VoiceChat = ({ clientId = "default" }) => {
@@ -139,8 +140,8 @@ const VoiceChat = ({ clientId = "default" }) => {
 
             console.log('Sending to backend...', clientId);
 
-            // Send to backend
-            const response = await fetch('http://localhost:8000/voice/chat', {
+            // Send to backend (env-driven base URL — works in production)
+            const response = await fetch(`${API_BASE}/voice/chat`, {
                 method: 'POST',
                 body: formData
             });

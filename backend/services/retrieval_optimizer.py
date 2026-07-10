@@ -16,6 +16,7 @@ from rank_bm25 import BM25Okapi
 import re
 
 from logger import get_logger
+from config import get_settings
 
 logger = get_logger(__name__)
 
@@ -35,7 +36,7 @@ class RetrievalOptimizer:
         vector_weight: float = 0.7,
         keyword_weight: float = 0.3,
         enable_reranking: bool = True,
-        rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        rerank_model: Optional[str] = None
     ):
         """
         Initialize the retrieval optimizer.
@@ -54,6 +55,10 @@ class RetrievalOptimizer:
         if abs((vector_weight + keyword_weight) - 1.0) > 0.01:
             logger.warning(f"Weights don't sum to 1.0: {vector_weight} + {keyword_weight}")
         
+        # Resolve the re-ranker model (multilingual by default, see config).
+        if rerank_model is None:
+            rerank_model = get_settings().rerank_model
+
         # Initialize re-ranker if enabled
         self.reranker = None
         if enable_reranking:
@@ -470,9 +475,53 @@ Now rewrite this query:"""
         
         domain_info = f"\n\nDomain context: {domain_context}" if domain_context else ""
         
+        # The knowledge base is embedded in ONE language; the search query must be
+        # in that SAME language or the multilingual embeddings won't match (cross-
+        # language similarity is weak). So we convert every query to the KB language
+        # here. NOTE: this only affects RETRIEVAL — the answer is still generated
+        # from the user's ORIGINAL question, so the reply stays in their language.
+        content_language = (get_settings().content_language or "english").lower()
+        if content_language == "english":
+            # English-pivot: documents are in English -> translate ALL queries
+            # (native Sinhala script AND romanized "Singlish") into clear English.
+            language_block = (
+                "• The documents are in ENGLISH. Convert the query to clear English:\n"
+                "  - Sinhala script (සිංහල)  -> translate to English.\n"
+                "  - Tamil script (தமிழ்)  -> translate to English.\n"
+                "  - Romanized Sinhala / \"Singlish\" (Sinhala typed in English letters,\n"
+                "    e.g. \"mata refund ekak ganna puluwanda\") -> translate to English.\n"
+                "  - Romanized Tamil (Tamil typed in English letters) -> translate to English.\n"
+                "  - Already English -> keep as English and just clean it up.\n"
+                "• Examples:\n"
+                "  \"mata refund ekak ganna puluwanda\" -> \"Can I get a refund?\"\n"
+                "  \"ඔයාලගේ office එක කීයටද වහන්නේ?\" -> \"What time does your office close?\"\n"
+                "  \"உங்கள் அலுவலகம் எத்தனை மணிக்கு மூடப்படும்?\" -> \"What time does your office close?\"\n"
+                "  \"plan eka mokakda\" -> \"What plans are available?\""
+            )
+        elif content_language == "auto":
+            language_block = (
+                "• Leave the query in whatever language/script it arrived in; only fix\n"
+                "  obvious typos. Do not translate between languages."
+            )
+        else:  # "sinhala": documents are in Sinhala script
+            language_block = (
+                "• The documents are in SINHALA SCRIPT. Convert the query to Sinhala script:\n"
+                "  - Romanized Sinhala / \"Singlish\" (e.g. \"oyage plan eka mokakda\")\n"
+                "    -> transliterate/translate into natural Sinhala script.\n"
+                "  - Already Sinhala script -> keep it and just clean it up.\n"
+                "  - Plain English -> keep it in English.\n"
+                "• Examples:\n"
+                "  \"oyage plan eka mokakda\" -> \"දැනට තියෙන ප්ලෑන් මොනවද?\"\n"
+                "  \"mata refund ekak ganna puluwanda\" -> \"මට මුදල් ආපසු ලබා ගත හැකිද?\""
+            )
+
         system_prompt = f"""You are a query normalization expert. Transform raw user queries into clear, comprehensive search queries optimized for semantic retrieval.
 
-🎯 Your Tasks:
+🌐 LANGUAGE (do this FIRST, it matters most for retrieval):
+{language_block}
+• Output ONLY the query — no explanation, no romanization in brackets.
+
+🎯 Your Tasks (then apply to the converted query):
 1. **Fix typos and grammar** - Correct spelling and grammatical errors
 2. **Expand abbreviations** - Convert short forms to full terms
    • ol, O/L, o-level → "Ordinary Level (O/L)"  
@@ -514,10 +563,11 @@ Return ONLY the normalized query, nothing else.{context}"""
         prompt = f"Raw query: {query}\n\nNormalized query:"
         
         try:
-            # Generate normalized query
+            # Generate normalized query using the cheap utility model
             normalized = llm_service.generate_response(
                 query=prompt,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                lightweight=True
             )
             
             # Clean up response
@@ -760,14 +810,29 @@ Do NOT include explanations or extra text."""
                     # Generate embedding
                     query_embedding = embeddings_service.embed_text(var_query)
                     
-                    # Vector search
-                    results = vector_store.query(
+                    # Vector search — FAISS store returns a ChromaDB-style dict
+                    # ({documents/metadatas/distances/ids: [[...]]}); normalize it
+                    # into a flat list of doc dicts for RRF fusion.
+                    raw = vector_store.query(
                         collection_name=collection_name,
-                        query_embedding=query_embedding,
-                        top_k=top_k_per_query,
+                        query_embeddings=[query_embedding],
+                        n_results=top_k_per_query,
                         metadata_filter=metadata_filter
                     )
-                    
+                    results = []
+                    if raw and raw.get('documents') and raw['documents'][0]:
+                        docs = raw['documents'][0]
+                        metas = (raw.get('metadatas') or [[]])[0]
+                        dists = (raw.get('distances') or [[]])[0]
+                        ids = (raw.get('ids') or [[]])[0]
+                        for d_i, text in enumerate(docs):
+                            results.append({
+                                'id': ids[d_i] if d_i < len(ids) else f"doc_{d_i}",
+                                'text': text,
+                                'metadata': metas[d_i] if d_i < len(metas) else {},
+                                'distance': float(dists[d_i]) if d_i < len(dists) else None,
+                            })
+
                     # Track which variation this came from
                     is_original = (i == 0 and var_query.lower() == query.lower())
                     weight = boost_original if is_original else 1.0

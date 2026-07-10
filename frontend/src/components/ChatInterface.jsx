@@ -1,13 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { queryDocuments, chatWithDocuments } from '../services/api';
+import ReactMarkdown from 'react-markdown';
+import { publicChat, submitFeedback } from '../services/api';
 import './ChatInterface.css';
 
-const ChatInterface = ({ clientId }) => {
+const ChatInterface = ({ clientId, isPublic = false, greeting = '', accentColor, sessionId = null }) => {
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
-    const [mode, setMode] = useState('chat'); // 'chat' or 'query'
-    const [showSources, setShowSources] = useState(true);
+    const [showSources, setShowSources] = useState(!isPublic);
+    const [feedbackGiven, setFeedbackGiven] = useState({});
+    const sessionRef = useRef(sessionId || 'sess-' + Math.random().toString(36).slice(2));
     const [expandedSources, setExpandedSources] = useState({});
     const [expandedAnswers, setExpandedAnswers] = useState({});
     const messagesEndRef = useRef(null);
@@ -200,60 +202,30 @@ const ChatInterface = ({ clientId }) => {
         setLoading(true);
 
         try {
-            let response;
+            // Conversational chat via the scoped public endpoint
+            const history = messages
+                .filter((m) => m.role === 'user' || m.role === 'assistant')
+                .map((m) => ({ role: m.role, content: m.content }));
 
-            if (mode === 'query') {
-                // One-shot query
-                response = await queryDocuments(clientId, userMessage.content, showSources, 3);
+            const response = await publicChat(clientId, userMessage.content, history, sessionRef.current);
 
-                const assistantMessage = {
-                    role: 'assistant',
-                    content: response.answer,
-                    sources: response.sources || [],
-                    confidence: response.confidence || 0,
-                    is_uncertain: response.is_uncertain || false,
-                    timestamp: new Date().toLocaleTimeString(),
-                };
+            const assistantMessage = {
+                role: 'assistant',
+                content: response.response,
+                sources: response.sources || [],
+                confidence: response.confidence || 0,
+                is_uncertain: response.is_uncertain || false,
+                usedRetrieval: response.used_retrieval,
+                escalated: response.escalated,
+                interactionId: response.interaction_id,
+                timestamp: new Date().toLocaleTimeString(),
+            };
 
-                setMessages((prev) => [...prev, assistantMessage]);
-                
-                // Auto-speak response if voice is enabled
-                if (voiceEnabled && response.answer) {
-                    speakText(response.answer);
-                }
-            } else {
-                // Conversational chat
-                const history = messages
-                    .filter((m) => m.role === 'user' || m.role === 'assistant')
-                    .map((m) => ({
-                        role: m.role,
-                        content: m.content,
-                    }));
+            setMessages((prev) => [...prev, assistantMessage]);
 
-                response = await chatWithDocuments(
-                    clientId,
-                    userMessage.content,
-                    history,
-                    true,
-                    3
-                );
-
-                const assistantMessage = {
-                    role: 'assistant',
-                    content: response.response,
-                    sources: response.sources || [],
-                    confidence: response.confidence || 0,
-                    is_uncertain: response.is_uncertain || false,
-                    usedRetrieval: response.used_retrieval,
-                    timestamp: new Date().toLocaleTimeString(),
-                };
-
-                setMessages((prev) => [...prev, assistantMessage]);
-                
-                // Auto-speak response if voice is enabled
-                if (voiceEnabled && response.response) {
-                    speakText(response.response);
-                }
+            // Auto-speak response if voice is enabled
+            if (voiceEnabled && response.response) {
+                speakText(response.response);
             }
         } catch (err) {
             const errorMessage = {
@@ -264,6 +236,16 @@ const ChatInterface = ({ clientId }) => {
             setMessages((prev) => [...prev, errorMessage]);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleFeedback = async (index, interactionId, rating) => {
+        if (!interactionId || feedbackGiven[index]) return;
+        setFeedbackGiven((prev) => ({ ...prev, [index]: rating }));
+        try {
+            await submitFeedback(clientId, interactionId, rating);
+        } catch (err) {
+            console.error('Feedback failed', err);
         }
     };
 
@@ -296,21 +278,6 @@ const ChatInterface = ({ clientId }) => {
             <div className="chat-header">
                 <h3>💬 Chat with Documents</h3>
                 <div className="chat-controls">
-                    <div className="mode-selector">
-                        <button
-                            className={mode === 'chat' ? 'active' : ''}
-                            onClick={() => setMode('chat')}
-                        >
-                            Chat Mode
-                        </button>
-                        <button
-                            className={mode === 'query' ? 'active' : ''}
-                            onClick={() => setMode('query')}
-                        >
-                            Query Mode
-                        </button>
-                    </div>
-                    
                     {/* Voice Controls */}
                     {speechSupported && (
                         <div className="voice-controls">
@@ -353,12 +320,8 @@ const ChatInterface = ({ clientId }) => {
             <div className="chat-messages">
                 {messages.length === 0 ? (
                     <div className="empty-chat">
-                        <p>👋 Start a conversation!</p>
-                        <small>
-                            {mode === 'chat'
-                                ? 'Chat mode maintains conversation context'
-                                : 'Query mode answers each question independently'}
-                        </small>
+                        <p>{greeting || '👋 Start a conversation!'}</p>
+                        <small>Ask a question to get started</small>
                     </div>
                 ) : (
                     <>
@@ -393,34 +356,18 @@ const ChatInterface = ({ clientId }) => {
                                             </div>
                                         )}
 
-                                        {/* Short answer (highlighted) and full description (expandable) */}
-                                        {(() => {
-                                            const { short, full } = extractShortAnswer(msg.content);
-                                            return (
-                                                <>
-                                                    {short && (
-                                                        <div className="message-content short-answer">
-                                                            {short}
-                                                        </div>
-                                                    )}
-                                                    {full && (
-                                                        <div className="full-description-container">
-                                                            <button
-                                                                className="description-toggle-btn"
-                                                                onClick={() => setExpandedAnswers(prev => ({ ...prev, [index]: !prev[index] }))}
-                                                            >
-                                                                {expandedAnswers[index] ? '▼' : '▶'} {expandedAnswers[index] ? 'Hide' : 'Show'} Details
-                                                            </button>
-                                                            {expandedAnswers[index] && (
-                                                                <div className="message-content full-description">
-                                                                    {full}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    )}
-                                                </>
-                                            );
-                                        })()}
+                                        {/* Full answer, rendered as markdown (bold, bullets, links) */}
+                                        <div className="message-content markdown-body">
+                                            <ReactMarkdown
+                                                components={{
+                                                    a: ({ node, ...props }) => (
+                                                        <a target="_blank" rel="noreferrer" {...props} />
+                                                    ),
+                                                }}
+                                            >
+                                                {msg.content}
+                                            </ReactMarkdown>
+                                        </div>
                                     </>
                                 )}
                                 {msg.role !== 'assistant' && <div className="message-content">{msg.content}</div>}
@@ -468,6 +415,23 @@ const ChatInterface = ({ clientId }) => {
                                     <small className="retrieval-status">
                                         {msg.usedRetrieval ? '✓ Used document context' : 'ℹ️ No retrieval'}
                                     </small>
+                                )}
+                                {msg.escalated && (
+                                    <small className="escalated-badge">🙋 Connected to a human agent</small>
+                                )}
+                                {msg.role === 'assistant' && msg.interactionId && (
+                                    <div className="feedback-row">
+                                        {feedbackGiven[index] ? (
+                                            <small className="feedback-thanks">Thanks for your feedback 🙏</small>
+                                        ) : (
+                                            <>
+                                                <button className="fb-btn" title="Helpful"
+                                                    onClick={() => handleFeedback(index, msg.interactionId, 'up')}>👍</button>
+                                                <button className="fb-btn" title="Not helpful"
+                                                    onClick={() => handleFeedback(index, msg.interactionId, 'down')}>👎</button>
+                                            </>
+                                        )}
+                                    </div>
                                 )}
                             </div>
                         ))}

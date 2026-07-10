@@ -38,26 +38,46 @@ class LLMService:
             temperature: Sampling temperature (defaults to settings)
             max_tokens: Maximum tokens in response (defaults to settings)
         """
-        self.api_key = api_key or settings.groq_api_key
-        self.model_name = model_name or settings.llm_model
+        self.provider = (settings.llm_provider or "groq").lower()
         self.temperature = temperature if temperature is not None else settings.llm_temperature
         self.max_tokens = max_tokens or settings.llm_max_tokens
-        
-        if not self.api_key:
-            logger.warning("Groq API key not provided. LLM functionality will be limited.")
-            self.llm = None
+
+        if self.provider == "gemini":
+            self.api_key = api_key or settings.google_api_key
+            self.model_name = model_name or settings.gemini_model
+            self.utility_model_name = settings.gemini_utility_model
         else:
-            # Initialize ChatGroq
-            self.llm = ChatGroq(
-                api_key=self.api_key,
-                model_name=self.model_name,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens
-            )
-        
+            self.api_key = api_key or settings.groq_api_key
+            self.model_name = model_name or settings.llm_model
+            self.utility_model_name = settings.llm_utility_model
+
+        self.llm = self._build_client(self.model_name, self.temperature, self.max_tokens)
+        # Lightweight client for cheap auxiliary calls + resilient fallback
+        self.utility_llm = self._build_client(self.utility_model_name, 0.0, 512)
+
         logger.info(
-            f"LLMService initialized with model={self.model_name}, "
-            f"temperature={self.temperature}, max_tokens={self.max_tokens}"
+            f"LLMService initialized: provider={self.provider}, model={self.model_name}, "
+            f"utility={self.utility_model_name}"
+        )
+
+    def _build_client(self, model: str, temperature: float, max_tokens: int):
+        """Create a chat client for the configured provider (Groq or Gemini)."""
+        if not self.api_key:
+            logger.warning(f"No API key for provider '{self.provider}'. LLM disabled.")
+            return None
+        if self.provider == "gemini":
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            return ChatGoogleGenerativeAI(
+                model=model,
+                google_api_key=self.api_key,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        return ChatGroq(
+            api_key=self.api_key,
+            model_name=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
     
     def generate_response(
@@ -65,27 +85,30 @@ class LLMService:
         query: str,
         context: Optional[List[str]] = None,
         system_prompt: Optional[str] = None,
-        conversation_history: Optional[List[Dict[str, str]]] = None
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        lightweight: bool = False
     ) -> str:
         """
         Generate a response to a user query.
-        
+
         Args:
             query: User's question or prompt
             context: List of relevant context passages (from RAG retrieval)
             system_prompt: Custom system prompt (optional)
             conversation_history: Previous conversation messages (optional)
-        
+            lightweight: Use the cheap utility model (for internal preprocessing
+                         like query normalization) instead of the main model
+
         Returns:
             Generated response text
         """
         # Build system prompt
         if system_prompt is None:
             system_prompt = self._get_default_system_prompt()
-        
+
         # Build messages
         messages = [SystemMessage(content=system_prompt)]
-        
+
         # Add conversation history if provided
         if conversation_history:
             for msg in conversation_history:
@@ -93,17 +116,25 @@ class LLMService:
                     messages.append(HumanMessage(content=msg["content"]))
                 elif msg["role"] == "assistant":
                     messages.append(AIMessage(content=msg["content"]))
-        
+
         # Build user message with context
         user_message = self._build_user_message(query, context)
         messages.append(HumanMessage(content=user_message))
-        
+
         logger.info(f"Generating response for query: {query[:100]}...")
-        
+
         try:
-            # Generate response
-            response = self.llm.invoke(messages)
+            # Pick the model: cheap utility model for internal preprocessing,
+            # main model for actual answers.
+            llm = self.utility_llm if (lightweight and self.utility_llm) else self.llm
+            response = llm.invoke(messages)
             response_text = response.content
+            # Gemini may return content as a list of parts — normalize to string.
+            if isinstance(response_text, list):
+                response_text = "".join(
+                    p if isinstance(p, str) else (p.get("text") or "") if isinstance(p, dict) else ""
+                    for p in response_text
+                )
             
             logger.info(f"Generated response: {response_text[:100]}...")
             return response_text
@@ -148,20 +179,27 @@ class LLMService:
         self,
         query: str,
         conversation_history: List[Dict[str, str]],
-        context: Optional[List[str]] = None
+        context: Optional[List[str]] = None,
+        system_role: Optional[str] = None,
+        few_shot_examples: Optional[List[str]] = None
     ) -> str:
         """
         Generate a conversational response with history.
-        
+
         Args:
             query: Current user message
             conversation_history: Previous conversation messages
             context: Optional context from RAG retrieval
-        
+            system_role: Client persona (e.g. telecom support, university advisor)
+            few_shot_examples: Domain-specific example dialogues to inject
+
         Returns:
             Generated response text
         """
-        system_prompt = self._get_chat_system_prompt()
+        system_prompt = self._get_chat_system_prompt(
+            role=system_role,
+            few_shot_examples=few_shot_examples
+        )
         
         response = self.generate_response(
             query=query,
@@ -173,6 +211,51 @@ class LLMService:
         # Clean citation phrases from response
         return self._clean_citation_phrases(response)
     
+    def detect_emotion(self, message: str) -> Dict[str, Any]:
+        """Classify the customer's emotional state (cheap utility-model call).
+
+        Returns {emotion, intensity (1-5), wants_human}.
+        """
+        default = {"emotion": "neutral", "intensity": 1, "wants_human": False}
+        if not self.utility_llm or not (message or "").strip():
+            return default
+        system = (
+            "You are an emotion classifier for customer-support messages. "
+            "Classify ONLY the customer's message. Respond with ONLY compact JSON, no prose: "
+            '{"emotion":"angry|frustrated|confused|neutral|happy","intensity":1,"wants_human":false}. '
+            "intensity is 1-5 (strength of the emotion). wants_human is true only if they explicitly "
+            "ask for a human/agent/manager or to escalate."
+        )
+        try:
+            import json
+            import re
+            resp = self.utility_llm.invoke(
+                [SystemMessage(content=system), HumanMessage(content=message)]
+            )
+            text = resp.content
+            if isinstance(text, list):
+                text = "".join(
+                    p if isinstance(p, str) else (p.get("text") or "") if isinstance(p, dict) else ""
+                    for p in text
+                )
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
+            emotion = str(data.get("emotion", "neutral")).lower().strip()
+            if emotion not in {"angry", "frustrated", "confused", "neutral", "happy"}:
+                emotion = "neutral"
+            try:
+                intensity = max(1, min(5, int(data.get("intensity", 1))))
+            except (TypeError, ValueError):
+                intensity = 1
+            return {
+                "emotion": emotion,
+                "intensity": intensity,
+                "wants_human": bool(data.get("wants_human", False)),
+            }
+        except Exception as e:
+            logger.warning(f"Emotion detection failed: {e}")
+            return default
+
     def _get_default_system_prompt(self) -> str:
         """Get the default system prompt."""
         return """You are a helpful AI assistant. Answer questions accurately and concisely based on the provided context. If you don't know the answer, say so."""
@@ -186,7 +269,19 @@ class LLMService:
         """
         role_desc = role or "helpful assistant"
         
-        return f"""You are a {role_desc}. 
+        return f"""You are a {role_desc}.
+
+🌐 LANGUAGE (decide from the user's QUESTION, in this order):
+1. If the question contains ANY Sinhala script (සිංහල) → reply ENTIRELY in Sinhala script.
+2. Else if it contains ANY Tamil script (தமிழ்) → reply ENTIRELY in Tamil script.
+3. Else if it is romanized Sinhala / "Singlish" (Sinhala words in Latin letters, e.g.
+   "mata plan eka gana danaganna oney") → reply in natural, fluent Sinhala SCRIPT.
+4. Else if it is romanized Tamil (Tamil words in Latin letters) → reply in natural,
+   fluent Tamil SCRIPT.
+5. Else (the question is in plain English) → reply in ENGLISH.
+• Match the user's language exactly; never switch languages on the user.
+• The retrieved information is usually in English — when replying in Sinhala or Tamil,
+  translate its MEANING into that language; never paste it verbatim.
 
 📋 CONTENT RULES:
 • Answer naturally, as if you know it personally
@@ -217,59 +312,65 @@ Each project showcases his skills in database design and system development."
 
 Always format responses for easy scanning and readability!"""
     
-    def _get_chat_system_prompt(self) -> str:
-        """Get system prompt for conversational chat."""
-        return """You are a helpful assistant having a natural conversation.
+    def _get_chat_system_prompt(
+        self,
+        role: Optional[str] = None,
+        few_shot_examples: Optional[List[str]] = None
+    ) -> str:
+        """
+        Build the conversational system prompt from the client persona and
+        domain-specific few-shot examples.
 
-📋 CONTENT RULES:
-1. Be CONFIDENT and DIRECT - no uncertain language like 'might', 'could be', 'possibly'
-2. Never show your reasoning process - just state facts directly
-3. Give ONLY the most important details first (2-3 key points)
-4. After brief answer, offer to provide more details
-5. Ask follow-up questions to engage the user
-6. Only exclude info if truly not relevant
+        Args:
+            role: Persona text for this client's vertical
+            few_shot_examples: Domain example dialogues (injected, not baked in)
+        """
+        role_desc = role or "a helpful assistant"
 
-🧠 CONVERSATIONAL CONTEXT - CRITICAL:
-1. ALWAYS read the conversation history to understand what the user is asking about
-2. When user says 'yes', 'what about that', 'the fup limit', 'this package' - they're referring to the CURRENT TOPIC from previous messages
-3. Connect follow-up questions to the ongoing topic - don't treat each question as standalone
-4. If discussing a specific package/topic, follow-ups are about THAT package/topic, not all similar topics
-5. Example: If discussing YouTube package and user asks 'what is the fup limit', answer ONLY about YouTube package FUP, not all FUP policies
-6. Example: If user asks 'give me a youtube package' then says 'yes what is the fup limit', they mean the YouTube package you just mentioned
-7. Stay focused on the current topic unless user explicitly changes the subject
+        if few_shot_examples:
+            examples_block = "\n\n".join(few_shot_examples)
+        else:
+            # Domain-neutral fallback so no vertical's examples bleed into another
+            examples_block = (
+                'User: "tell me about the premium option"\n'
+                'You: "The premium option includes [key benefits]. Want the full details?"\n'
+                'User: "what does it cost"\n'
+                'You: "It\'s [price] — I can break down what\'s included if you\'d like."'
+            )
 
-💬 RESPONSE STYLE:
-• Keep initial response SHORT and focused
-• Be confident - state facts, don't explain your logic
-• No wishy-washy language - be direct and clear
-• End with questions like:
-  - "Would you like more details?"
-  - "Need help with anything else?"
-  - "Want to know about [specific aspect]?"
-• If user asks for more, then provide additional information
-• Be conversational and interactive, not a data dump
-• STAY ON TOPIC - don't list everything when discussing one thing
+        return f"""You are {role_desc}, having a natural conversation.
 
-✨ FORMATTING RULES (CRITICAL FOR READABILITY):
-• Use bullet points (•) for lists of items (2-3 items max in initial response)
-• Add blank lines between different topics
-• Use clear visual structure
+LANGUAGE (decide from the user's LAST message, in this order):
+1. If it contains ANY Sinhala script (සිංහල) → reply ENTIRELY in Sinhala script.
+2. Else if it contains ANY Tamil script (தமிழ்) → reply ENTIRELY in Tamil script.
+3. Else if it is romanized Sinhala / "Singlish" (Sinhala words in Latin letters) → reply
+   in natural, fluent Sinhala SCRIPT — never romanized.
+4. Else if it is romanized Tamil (Tamil words in Latin letters) → reply in natural,
+   fluent Tamil SCRIPT — never romanized.
+5. Else (plain English) → reply in ENGLISH.
+• Match their language every turn; never switch languages on the user.
+• Knowledge-base content is usually in English — when replying in Sinhala or Tamil, convey
+  its MEANING in that language rather than pasting it verbatim.
 
-Examples:
+IDENTITY & ACCOUNT (critical):
+• You do NOT have access to the user's account, phone number, current plan, balance, or usage. NEVER say "your plan is…", "your current plan", or claim to know their account or personal situation.
+• Present knowledge-base information as GENERAL options ("We offer…", "The Senior 55+ plan is…"), never as the user's personal data.
+• For account-specific questions (my bill, my plan, my usage), tell them to check the My Nexus app or offer to connect them to a human agent.
 
-❌ BAD (no context awareness):
-User: "give me a youtube package"
-You: "YouTube Unlimited is LKR 999/month..."
-User: "what is the fup limit"
-You: "There are several FUP policies: FUP_VIDEO has 50GB, FUP_SOCIAL has 20GB, FUP_STANDARD..."
+FOCUS (most important):
+• Answer ONLY the exact question asked — never volunteer unrelated products, plans, prices, or details.
+• If the retrieved context is not relevant to the question, IGNORE it. Never dump a product/plan spec sheet unless the user asked about that product.
+• Don't repeat what you already said. For greetings or small talk, reply briefly and ask how you can help — do NOT pitch.
 
-✅ GOOD (context-aware):
-User: "give me a youtube package"
-You: "YouTube Unlimited is LKR 999/month with unlimited YouTube streaming. Want details?"
-User: "what is the fup limit"
-You: "The limit is 50GB - after that, speed reduces and video is capped at 720p. Need more info?"
+STYLE:
+• Read the conversation history; follow-ups like 'yes' or 'what about that' refer to the CURRENT topic. Stay on topic.
+• Be confident and direct — no 'might/could be/possibly', and never show your reasoning.
+• Lead with the 2-3 key points, then stop and offer more ("Want the details?").
+• Answer ONLY from the knowledge base; if it's not there, say so and offer to connect them to a human.
+• Use short paragraphs and bullet points (•) for lists. Keep it easy to scan.
 
-Always be brief, confident, engaging, context-aware, and ready to provide more when asked!"""
+Example of good, focused answering:
+{examples_block}"""
     
     def _build_user_message(self, query: str, context: Optional[List[str]] = None) -> str:
         """

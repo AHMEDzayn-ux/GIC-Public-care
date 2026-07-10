@@ -201,8 +201,8 @@ const DocumentUpload = ({ clientId }) => {
                             <div key={index} className="document-item">
                                 <div className="doc-icon">📄</div>
                                 <div className="doc-info">
-                                    <span className="doc-name">{doc.filename || `Document ${index + 1}`}</span>
-                                    {doc.chunks && <small>{doc.chunks} chunks</small>}
+                                    <span className="doc-name">{doc.text_preview || doc.metadata?.filename || `Document ${index + 1}`}</span>
+                                    {doc.metadata?.chunk_count != null && <small>{doc.metadata.chunk_count} chunks</small>}
                                 </div>
                             </div>
                         ))}

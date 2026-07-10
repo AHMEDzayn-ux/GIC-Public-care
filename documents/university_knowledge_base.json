@@ -1,0 +1,146 @@
+[
+  {
+    "title": "About ABC University",
+    "category": "general",
+    "tags": ["about", "university", "who are you", "overview"],
+    "content": "ABC University is a public university offering undergraduate and postgraduate programs across Computing, Engineering, Business, Science, and Humanities. We support students through the full journey — admissions, enrollment, coursework, exams, and graduation. You can manage most tasks through the Student Portal at portal.abcuniversity.edu or at the Student Services Center on campus."
+  },
+  {
+    "title": "How to apply for admission",
+    "category": "admissions",
+    "tags": ["apply", "admission", "application", "how to apply", "enroll", "register"],
+    "content": "To apply for admission: 1) Create an account on the online admissions portal at admissions.abcuniversity.edu. 2) Choose your program and intake. 3) Fill in the application form with your personal and academic details. 4) Upload your certificates, transcripts, and national ID/passport. 5) Pay the non-refundable application fee of $25. 6) Submit and track your application status online. Shortlisted applicants are invited for an entrance test or interview where applicable. Admission decisions are released on the portal."
+  },
+  {
+    "title": "Admission requirements and entry qualifications",
+    "category": "admissions",
+    "tags": ["requirements", "eligibility", "qualifications", "entry", "gpa", "a level"],
+    "content": "Undergraduate entry requires completion of secondary school (A/Levels or equivalent) with passes in three subjects relevant to the chosen program. Computing and Engineering require passes in Mathematics; Science programs require the relevant science subjects. Postgraduate entry requires a recognized bachelor's degree with a minimum GPA of 2.5. International qualifications are assessed for equivalence. English proficiency (IELTS 6.0 or equivalent) is required where instruction is in English."
+  },
+  {
+    "title": "Application deadlines and intakes",
+    "category": "admissions",
+    "tags": ["deadline", "intake", "when to apply", "dates", "semester start"],
+    "content": "ABC University has two intakes per year. The Fall intake application window is May 1 to July 31, with classes starting in September. The Spring intake window is November 1 to January 15, with classes starting in February. Late applications may be considered on a case-by-case basis if seats remain. Scholarship applicants should apply at least one month before the deadline."
+  },
+  {
+    "title": "Programs and courses offered",
+    "category": "courses",
+    "tags": ["programs", "courses", "degrees", "majors", "what do you offer", "subjects"],
+    "content": "ABC University offers undergraduate degrees including BSc Computer Science, BSc Software Engineering, BSc Data Science, BEng Electrical & Electronic Engineering, BBA Business Administration, BSc Accounting & Finance, and BA in Humanities. Postgraduate programs include MSc Computer Science, MBA, and MSc Data Analytics. Each program runs over 4 years (undergraduate) or 1-2 years (postgraduate). Detailed curricula and module lists are on the program pages at abcuniversity.edu/programs."
+  },
+  {
+    "title": "Course registration and enrollment steps",
+    "category": "enrollment",
+    "tags": ["course registration", "enroll", "register for courses", "add course", "semester registration"],
+    "content": "After you are admitted, register for courses each semester through the Student Portal: 1) Log in during the registration window shown in the academic calendar. 2) Select your compulsory (core) modules and any electives up to the credit limit (usually 15-18 credits/semester). 3) Check for prerequisites and timetable clashes. 4) Confirm and submit your registration. 5) Pay the semester fee to finalize enrollment. Your registration is only complete once fees are paid. Advisors are available during registration week to help you plan."
+  },
+  {
+    "title": "Adding or dropping courses",
+    "category": "enrollment",
+    "tags": ["add drop", "drop course", "withdraw course", "change course", "add course"],
+    "content": "You may add or drop courses through the Student Portal during the add/drop period, which is the first two weeks of each semester. Dropping a course during this period incurs no penalty and no grade is recorded. Withdrawing after the add/drop period but before the withdrawal deadline records a 'W' on your transcript with no GPA impact. Withdrawing after the deadline is not permitted except for documented medical or emergency reasons approved by the faculty."
+  },
+  {
+    "title": "Tuition fees and payment",
+    "category": "fees",
+    "tags": ["fees", "tuition", "cost", "payment", "how much", "pay fees"],
+    "content": "Tuition is charged per semester based on credits taken. Undergraduate tuition is approximately $1,500 per semester for local students and $3,000 for international students; postgraduate fees vary by program. Fees are payable via the Student Portal by card or bank transfer, or in person at the finance office. A payment plan (two installments per semester) is available on request. Registration is not finalized until at least the first installment is paid. A late payment fee of $50 applies after the due date."
+  },
+  {
+    "title": "Scholarships and financial aid",
+    "category": "fees",
+    "tags": ["scholarship", "financial aid", "bursary", "grant", "discount", "merit"],
+    "content": "ABC University offers merit scholarships covering 25-100% of tuition for top-performing applicants, need-based bursaries for students from low-income families, and sports and arts scholarships. Apply through the scholarships section of the admissions portal and attach supporting documents (academic records, income proof where relevant). Scholarship applications must be submitted at least one month before the admission deadline. Renewal each year depends on maintaining a minimum GPA of 3.0."
+  },
+  {
+    "title": "Student ID and registration confirmation",
+    "category": "procedures",
+    "tags": ["student id", "id card", "registration number", "student card"],
+    "content": "Once your admission is confirmed and first fees are paid, you receive a student registration number and can collect your Student ID card from the Student Services Center after orientation. The Student ID gives access to the library, labs, campus Wi-Fi, and exam halls. If lost, request a replacement through the portal for a $10 fee. Note: for questions about YOUR specific registration status, grades, or fee balance, log in to the Student Portal — staff cannot share personal account details over chat."
+  },
+  {
+    "title": "Academic calendar and semester dates",
+    "category": "procedures",
+    "tags": ["academic calendar", "semester dates", "term dates", "holidays", "schedule"],
+    "content": "The academic year has two semesters. Semester 1 runs September to December (exams in December), and Semester 2 runs February to May (exams in May). There is a short summer term in June-July for repeat or elective courses. Registration windows open two weeks before each semester. The full academic calendar with holidays and key deadlines is published at abcuniversity.edu/calendar."
+  },
+  {
+    "title": "Examinations, grading, and results",
+    "category": "exams",
+    "tags": ["exams", "grading", "results", "gpa", "marks", "assessment"],
+    "content": "Assessment combines coursework (assignments, quizzes, projects) and final examinations, with weightings stated in each module outline. Grades use a GPA scale from 0.0 to 4.0 (A=4.0, B=3.0, C=2.0, D=1.0, F=0.0). A minimum GPA of 2.0 is required to remain in good standing. Results are released on the Student Portal about four weeks after exams. Students who fail a module may re-sit it in the summer term or repeat it the following year."
+  },
+  {
+    "title": "Re-sit and repeat examinations",
+    "category": "exams",
+    "tags": ["resit", "repeat exam", "failed", "retake", "supplementary"],
+    "content": "If you fail a module, you may take a re-sit (supplementary) exam in the summer term for a re-sit fee of $30 per module. The maximum grade from a re-sit is capped at C. If you fail the re-sit, you must repeat the full module the next time it is offered. Students should apply for re-sits through the portal within two weeks of results being published."
+  },
+  {
+    "title": "Transcripts and certificate requests",
+    "category": "procedures",
+    "tags": ["transcript", "certificate", "documents", "official records", "request transcript"],
+    "content": "Request official transcripts and certificates through the Student Portal under Documents > Request. Standard processing takes 5-7 working days; express processing (2 days) is available for an extra fee. The first transcript each semester is free; additional copies are $5 each. Certificates are issued after you complete all graduation requirements and clear any outstanding fees."
+  },
+  {
+    "title": "Graduation requirements",
+    "category": "procedures",
+    "tags": ["graduation", "graduate", "requirements to graduate", "convocation", "final year"],
+    "content": "To graduate, you must complete all required credits for your program (typically 120 for undergraduate), achieve a cumulative GPA of at least 2.0, complete any mandatory internship or final-year project, and clear all outstanding fees and library dues. Apply to graduate through the portal in your final semester. The convocation ceremony is held once a year; details are announced to eligible graduands."
+  },
+  {
+    "title": "Hostel and accommodation",
+    "category": "campus",
+    "tags": ["hostel", "accommodation", "dorm", "housing", "residence", "stay"],
+    "content": "On-campus hostels are available for local and international students, allocated on a first-come, first-served basis with priority for students from distant regions and international students. Apply through the accommodation section of the portal after admission. Hostel fees are approximately $400 per semester including utilities. Rooms are shared (2-3 students). A limited number of single rooms are available at a higher rate. A refundable security deposit applies."
+  },
+  {
+    "title": "International students",
+    "category": "admissions",
+    "tags": ["international", "foreign students", "visa", "overseas", "abroad"],
+    "content": "International students apply through the same admissions portal and must additionally provide proof of English proficiency and a valid passport. After receiving an admission offer and paying the deposit, the university issues a visa support letter to help you apply for a student visa. International orientation covers visa compliance, accommodation, and health insurance. A dedicated International Student Office assists with settling in."
+  },
+  {
+    "title": "Library and learning resources",
+    "category": "campus",
+    "tags": ["library", "books", "study", "resources", "borrow", "online journals"],
+    "content": "The university library offers physical and digital collections, study spaces, and access to online journals and databases. Enrolled students borrow books using their Student ID (up to 5 books for 2 weeks, renewable). E-resources are accessible off-campus via the portal login. The library is open 8am-10pm on weekdays and 9am-5pm on weekends. Overdue books incur a small daily fine."
+  },
+  {
+    "title": "Orientation for new students",
+    "category": "procedures",
+    "tags": ["orientation", "new student", "first week", "induction", "getting started"],
+    "content": "New students attend a mandatory orientation before classes begin. Orientation covers campus tours, portal and email setup, meeting academic advisors, course registration help, ID card collection, and an introduction to university rules and support services. Dates are emailed to admitted students and posted on the academic calendar."
+  },
+  {
+    "title": "Deferment and leave of absence",
+    "category": "procedures",
+    "tags": ["defer", "leave of absence", "gap", "postpone", "break", "pause studies"],
+    "content": "Admitted students who cannot start on time may request a deferment of their admission to the next intake through the admissions office, usually granted once. Enrolled students needing a break may apply for a leave of absence (up to two semesters) for medical, financial, or personal reasons, with supporting documents. Apply through the portal before the semester begins; approval keeps your student status active so you can resume without re-applying."
+  },
+  {
+    "title": "Attendance policy",
+    "category": "procedures",
+    "tags": ["attendance", "absence", "skip class", "minimum attendance"],
+    "content": "Students are expected to maintain at least 80% attendance in each module. Falling below the minimum may bar you from sitting the final exam for that module. Medical absences should be reported with a certificate through the portal within one week. Persistent unexplained absence is followed up by academic advisors and may affect your standing."
+  },
+  {
+    "title": "Contact and student support services",
+    "category": "support",
+    "tags": ["contact", "help", "support", "student services", "counselor", "phone"],
+    "content": "Reach student support through the Help Center in the Student Portal, by email at support@abcuniversity.edu, or by phone at +1-800-222-0100 (weekdays 9am-5pm). The Student Services Center on campus handles registration, ID cards, and general queries. Academic advisors help with course planning, and a counseling service is available for personal and academic wellbeing. For anything specific to your account, use the portal or visit in person with your ID."
+  },
+  {
+    "title": "Campus facilities",
+    "category": "campus",
+    "tags": ["facilities", "campus", "labs", "sports", "cafeteria", "wifi", "gym"],
+    "content": "The campus includes computer and engineering labs, science laboratories, a library, sports facilities (gym, courts, and grounds), a health center, prayer/meditation rooms, cafeterias, and campus-wide Wi-Fi. Clubs and societies cover technology, sports, arts, and volunteering. Facility access is via your Student ID. Some specialized labs require booking through the portal."
+  },
+  {
+    "title": "Transfer credits and program change",
+    "category": "enrollment",
+    "tags": ["transfer credits", "change program", "switch major", "credit transfer"],
+    "content": "Students transferring from another recognized institution may apply for credit transfer for equivalent modules already completed, subject to faculty assessment (usually up to 50% of the program). To change your program/major within the university, apply through the portal before the start of a semester; approval depends on meeting the new program's entry requirements and seat availability. Credits already earned that apply to the new program are carried over."
+  }
+]

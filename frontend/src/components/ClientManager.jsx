@@ -1,96 +1,72 @@
-import React, { useState, useEffect } from 'react';
-import { createClient, listClients, deleteClient } from '../services/api';
+import { useState, useEffect } from 'react';
+import { createClient, listClients, deleteClient, listDomains } from '../services/api';
 import './ClientManager.css';
+
+const slugify = (s) =>
+    s.toLowerCase().trim().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
 
 const ClientManager = ({ onClientSelect, selectedClient }) => {
     const [clients, setClients] = useState([]);
-    const [newClientId, setNewClientId] = useState('');
-    const [newClientDesc, setNewClientDesc] = useState('');
+    const [domains, setDomains] = useState([]);
+    const [form, setForm] = useState({ name: '', slug: '', description: '', domain: 'generic', persona: '' });
+    const [slugEdited, setSlugEdited] = useState(false);
     const [loading, setLoading] = useState(false);
-    const [initialLoading, setInitialLoading] = useState(true);
     const [error, setError] = useState('');
-    const [page, setPage] = useState(0);
-    const [hasMore, setHasMore] = useState(true);
-    const [totalClients, setTotalClients] = useState(0);
-    const PAGE_SIZE = 20;
 
     useEffect(() => {
-        loadClients(true); // Load initial batch on mount
+        loadClients();
+        listDomains().then((d) => setDomains(d.domains || [])).catch(() => {});
     }, []);
 
-    const loadClients = async (reset = false) => {
+    const loadClients = async () => {
         try {
-            if (reset && page === 0) {
-                setInitialLoading(true);
-            } else {
-                setLoading(true);
-            }
-            const currentPage = reset ? 0 : page;
-            const skip = currentPage * PAGE_SIZE;
-
-            const data = await listClients(skip, PAGE_SIZE);
-
-            if (reset) {
-                // Reset: replace all clients
-                setClients(data.clients || []);
-                setPage(1);
-            } else {
-                // Append: add more clients
-                setClients(prev => [...prev, ...(data.clients || [])]);
-                setPage(prev => prev + 1);
-            }
-
-            setTotalClients(data.total || 0);
-            setHasMore((skip + PAGE_SIZE) < (data.total || 0));
-            setError('');
+            const data = await listClients(0, 200);
+            setClients(data.clients || []);
         } catch (err) {
-            setError('Failed to load clients: ' + err.message);
-        } finally {
-            setLoading(false);
-            setInitialLoading(false);
+            setError('Failed to load clients: ' + (err?.response?.data?.detail || err.message));
         }
     };
 
-    const loadMoreClients = () => {
-        if (!loading && hasMore) {
-            loadClients(false);
-        }
+    const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+    // Auto-derive slug from name until the user edits slug directly.
+    const onNameChange = (v) => {
+        setField('name', v);
+        if (!slugEdited) setField('slug', slugify(v));
     };
 
-    const handleCreateClient = async (e) => {
+    const handleCreate = async (e) => {
         e.preventDefault();
-        if (!newClientId.trim()) {
-            setError('Client ID is required');
-            return;
-        }
-
+        if (!form.slug.trim()) { setError('Slug is required'); return; }
+        setLoading(true);
+        setError('');
         try {
-            setLoading(true);
-            await createClient(newClientId, newClientDesc);
-            setNewClientId('');
-            setNewClientDesc('');
-            await loadClients(true); // Reset pagination
-            setError('');
+            await createClient({
+                slug: form.slug,
+                name: form.name || form.slug,
+                description: form.description,
+                domain: form.domain,
+                persona: form.persona || null,
+            });
+            setForm({ name: '', slug: '', description: '', domain: 'generic', persona: '' });
+            setSlugEdited(false);
+            await loadClients();
         } catch (err) {
-            setError('Failed to create client: ' + err.message);
+            setError('Create failed: ' + (err?.response?.data?.detail || err.message));
         } finally {
             setLoading(false);
         }
     };
 
-    const handleDeleteClient = async (clientId) => {
-        if (!window.confirm(`Delete client "${clientId}"?`)) return;
-
+    const handleDelete = async (slug) => {
+        if (!window.confirm(`Delete client "${slug}" and all its data?`)) return;
+        setLoading(true);
         try {
-            setLoading(true);
-            await deleteClient(clientId);
-            if (selectedClient === clientId) {
-                onClientSelect(null);
-            }
-            await loadClients(true); // Reset pagination
-            setError('');
+            await deleteClient(slug);
+            if (selectedClient === slug) onClientSelect(null);
+            await loadClients();
         } catch (err) {
-            setError('Failed to delete client: ' + err.message);
+            setError('Delete failed: ' + (err?.response?.data?.detail || err.message));
         } finally {
             setLoading(false);
         }
@@ -98,88 +74,65 @@ const ClientManager = ({ onClientSelect, selectedClient }) => {
 
     return (
         <div className="client-manager">
-            <h2>Client Management</h2>
-
+            <h2>➕ Create a Client</h2>
             {error && <div className="error-message">{error}</div>}
 
-            <form onSubmit={handleCreateClient} className="create-client-form">
-                <input
-                    type="text"
-                    placeholder="Client ID (e.g., acme-corp)"
-                    value={newClientId}
-                    onChange={(e) => setNewClientId(e.target.value)}
-                    disabled={loading}
-                />
-                <input
-                    type="text"
-                    placeholder="Description (optional)"
-                    value={newClientDesc}
-                    onChange={(e) => setNewClientDesc(e.target.value)}
-                    disabled={loading}
-                />
-                <button type="submit" disabled={loading}>
-                    {loading ? 'Creating...' : 'Create Client'}
+            <form onSubmit={handleCreate} className="create-client-form">
+                <label>Name
+                    <input type="text" placeholder="e.g. Nexus Telecom" value={form.name}
+                        onChange={(e) => onNameChange(e.target.value)} disabled={loading} />
+                </label>
+                <label>Slug (URL id)
+                    <input type="text" placeholder="nexus-telecom" value={form.slug}
+                        onChange={(e) => { setSlugEdited(true); setField('slug', slugify(e.target.value)); }}
+                        disabled={loading} />
+                </label>
+                <label>Domain
+                    <select value={form.domain} onChange={(e) => setField('domain', e.target.value)} disabled={loading}>
+                        {domains.map((d) => (
+                            <option key={d.key} value={d.key}>{d.display_name}</option>
+                        ))}
+                    </select>
+                </label>
+                <label>Description
+                    <input type="text" placeholder="Short description" value={form.description}
+                        onChange={(e) => setField('description', e.target.value)} disabled={loading} />
+                </label>
+                <label className="full">Persona override (optional — defaults to the domain's persona)
+                    <textarea rows="2" placeholder="Leave blank to use the domain default"
+                        value={form.persona} onChange={(e) => setField('persona', e.target.value)} disabled={loading} />
+                </label>
+                <button type="submit" disabled={loading} className="btn-primary">
+                    {loading ? 'Creating…' : 'Create Client'}
                 </button>
             </form>
 
             <div className="clients-list">
-                <h3>Existing Clients ({clients.length}{totalClients > clients.length ? ` of ${totalClients}` : ''})</h3>
-
-                {initialLoading ? (
-                    <div className="loading-skeleton">
-                        <p>Loading clients...</p>
-                        <div className="skeleton-cards">
-                            {[1, 2, 3].map(i => (
-                                <div key={i} className="skeleton-card"></div>
-                            ))}
-                        </div>
-                    </div>
-                ) : totalClients === 0 ? (
-                    <p className="empty-state">No clients yet. Create one to get started!</p>
+                <h3>Your Clients ({clients.length})</h3>
+                {clients.length === 0 ? (
+                    <p className="empty-state">No clients yet. Create one above to get started!</p>
                 ) : (
-                    <>
-                        <div className="clients-grid">
-                            {clients.map((client) => (
-                                <div
-                                    key={client.client_id}
-                                    className={`client-card ${selectedClient === client.client_id ? 'selected' : ''}`}
-                                >
-                                    <div className="client-info">
-                                        <h4>{client.client_id}</h4>
-                                        {client.description && <p>{client.description}</p>}
-                                        <small>{client.document_count || 0} documents</small>
-                                    </div>
-                                    <div className="client-actions">
-                                        <button
-                                            onClick={() => onClientSelect(client.client_id)}
-                                            className="btn-select"
-                                            disabled={selectedClient === client.client_id}
-                                        >
-                                            {selectedClient === client.client_id ? 'Selected' : 'Select'}
-                                        </button>
-                                        <button
-                                            onClick={() => handleDeleteClient(client.client_id)}
-                                            className="btn-delete"
-                                            disabled={loading}
-                                        >
-                                            Delete
-                                        </button>
-                                    </div>
+                    <div className="clients-grid">
+                        {clients.map((c) => (
+                            <div key={c.slug} className={`client-card ${selectedClient === c.slug ? 'selected' : ''}`}>
+                                <div className="client-info">
+                                    <h4>{c.name || c.slug}</h4>
+                                    <span className={`domain-badge domain-${c.domain}`}>{c.domain}</span>
+                                    {c.description && <p>{c.description}</p>}
+                                    <small>{c.document_count || 0} document(s) · /c/{c.slug}</small>
                                 </div>
-                            ))}
-                        </div>
-                        {hasMore && (
-                            <div className="load-more-container">
-                                <button
-                                    className="btn-load-more"
-                                    onClick={loadMoreClients}
-                                    disabled={loading}
-                                >
-                                    {loading ? 'Loading...' : `Load More (${totalClients - clients.length} remaining)`}
-                                </button>
+                                <div className="client-actions">
+                                    <button onClick={() => onClientSelect(c.slug)} className="btn-select"
+                                        disabled={selectedClient === c.slug}>
+                                        {selectedClient === c.slug ? 'Selected' : 'Manage'}
+                                    </button>
+                                    <button onClick={() => handleDelete(c.slug)} className="btn-delete" disabled={loading}>
+                                        Delete
+                                    </button>
+                                </div>
                             </div>
-                        )}
-                    </>
+                        ))}
+                    </div>
                 )}
             </div>
         </div>
