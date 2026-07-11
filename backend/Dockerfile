@@ -16,6 +16,8 @@ COPY . .
 ENV DOCUMENTS_DIR=/app/documents
 ENV VECTOR_STORES_DIR=/app/vector_stores
 
-EXPOSE 7860
+EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Shell form (not exec/JSON form) so $PORT actually expands - Cloud Run injects its
+# own PORT (default 8080); HF Spaces/other hosts that don't set it fall back to 8080.
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
