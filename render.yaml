@@ -31,7 +31,7 @@ services:
     staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
-        value: https://rag-backend.onrender.com # Update to the backend's actual assigned URL after its first deploy, then redeploy this service
+        value: https://rag-backend-exez.onrender.com
     routes:
       - type: rewrite
         source: /*
