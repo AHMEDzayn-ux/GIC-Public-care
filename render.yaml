@@ -1,29 +1,7 @@
+# Backend now runs on DigitalOcean App Platform (see .do/app.yaml) - Render's Python
+# free tier couldn't fit the embedding + reranker models in 512MB. This file only
+# hosts the frontend static site now.
 services:
-  - type: web
-    name: rag-backend
-    runtime: python
-    region: oregon
-    plan: free
-    branch: main
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: ENVIRONMENT
-        value: production
-      - key: LOG_LEVEL
-        value: INFO
-      - key: USE_RERANKING
-        value: "false" # Free tier is 512MB; embedding model + cross-encoder reranker together OOM on client creation. Re-enable if you upgrade to a bigger instance.
-      - key: GROQ_API_KEY
-        sync: false # You'll add this manually in Render dashboard
-      - key: GOOGLE_API_KEY
-        sync: false # Gemini is the default LLM/TTS/STT provider - add manually in Render dashboard
-      - key: JWT_SECRET
-        sync: false # Generate a random 32+ byte value - add manually in Render dashboard
-
   - type: web
     name: rag-frontend
     runtime: static
@@ -33,7 +11,7 @@ services:
     staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
-        value: https://rag-backend-exez.onrender.com
+        value: https://nexus-backend-7yq3e.ondigitalocean.app
     routes:
       - type: rewrite
         source: /*
