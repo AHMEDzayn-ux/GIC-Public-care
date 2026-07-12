@@ -73,6 +73,21 @@ def _get_subscription(db: Session, slug: str, msisdn: str) -> Optional[Subscript
     return None
 
 
+def verify_identity(db: Session, slug: str, msisdn: str, nic: str) -> bool:
+    """Check a claimed NIC against the account holder on file for this line.
+
+    Used to gate any chatbot action that reveals or changes account-specific
+    data (call/billing/activation history, tickets, plan/line changes, etc.) —
+    a phone number alone isn't proof of ownership.
+    """
+    sub = _get_subscription(db, slug, msisdn)
+    if sub is None or sub.customer is None:
+        return False
+    on_file = (sub.customer.nic or "").strip().upper()
+    given = (nic or "").strip().upper()
+    return bool(on_file) and on_file == given
+
+
 # ---- response shaping (dicts matching api/models.py) ------------------------
 
 def _sub_dict(s: Subscription) -> dict:

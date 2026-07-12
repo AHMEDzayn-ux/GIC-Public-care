@@ -54,6 +54,20 @@ _IDENT_PHONE = {"identifier": {"type": "string", "description": "The customer's 
 _IDENT_APPID = {"identifier": {"type": "string", "description": "The application ID or email"}}
 _IDENT_GENERIC = {"identifier": {"type": "string", "description": "The customer's account email or ID"}}
 
+# Identity-verified variant: required for any telecom tool that reveals or changes
+# account-specific data (history, billing, tickets, line changes, etc.) — a phone
+# number alone isn't proof of ownership. General package/plan/policy Q&A doesn't
+# use this and needs no verification.
+_IDENT_PHONE_VERIFIED = {
+    **_IDENT_PHONE,
+    "nic": {"type": "string", "description": (
+        "The customer's NIC (National ID card number) on file for this line. You MUST ask "
+        "for this and it MUST match before you may reveal or change anything account-specific "
+        "— never proceed on the phone number alone. If they don't know it or it doesn't match, "
+        "decline and offer to log a ticket or connect them with a human agent instead."
+    )},
+}
+
 
 # ---- Per-domain registry ----------------------------------------------------
 
@@ -74,20 +88,22 @@ ACTIONS: Dict[str, List[dict]] = {
               ["phone"]),
         _tool("lookup_account", "account_lookup",
               "Look up the customer's account to report their plan, balance, due date, data "
-              "usage, or status. Requires the customer's phone number.",
-              dict(_IDENT_PHONE), ["identifier"]),
+              "usage, or status. Requires the customer's phone number AND their NIC to verify "
+              "identity first.",
+              dict(_IDENT_PHONE_VERIFIED), ["identifier", "nic"]),
         _tool("change_plan", "account_change",
               "Change the customer's mobile plan to a new plan. Confirm the exact new plan "
-              "with the customer BEFORE calling this. Requires their phone number.",
-              {**_IDENT_PHONE, "new_plan": {"type": "string", "description": "The plan to switch to"}},
-              ["identifier", "new_plan"], confirm=True),
+              "with the customer BEFORE calling this. Requires their phone number AND their NIC "
+              "to verify identity first.",
+              {**_IDENT_PHONE_VERIFIED, "new_plan": {"type": "string", "description": "The plan to switch to"}},
+              ["identifier", "nic", "new_plan"], confirm=True),
         _tool("activate_package", "activation",
               "Activate/purchase a data or voice package on the customer's line. Confirm the "
-              "exact package with the customer BEFORE calling this. Requires their phone number "
-              "and the package name.",
-              {**_IDENT_PHONE,
+              "exact package with the customer BEFORE calling this. Requires their phone number, "
+              "the package name, AND their NIC to verify identity first.",
+              {**_IDENT_PHONE_VERIFIED,
                "package": {"type": "string", "description": "The package/plan name to activate"}},
-              ["identifier", "package"], confirm=True),
+              ["identifier", "nic", "package"], confirm=True),
         _tool("check_ticket", "request_status",
               "Check the status/progress of a previously logged ticket, activation, or change "
               "using its reference number (e.g. TT-100045, ACT-500012, CB-1002).",
@@ -96,45 +112,48 @@ ACTIONS: Dict[str, List[dict]] = {
         _tool("check_call_history", "call_history",
               "Look up the customer's call, SMS, or data usage log/history — e.g. to confirm "
               "whether they made a call, on a specific date, or to review recent activity. "
-              "Requires their phone number.",
-              {**_IDENT_PHONE,
+              "Requires their phone number AND their NIC to verify identity first.",
+              {**_IDENT_PHONE_VERIFIED,
                "date": {"type": "string", "description": "Specific date to check, as YYYY-MM-DD, "
                                                           "if the customer mentions one (resolve "
                                                           "relative dates against today's date)"}},
-              ["identifier"]),
+              ["identifier", "nic"]),
         _tool("check_billing", "billing_history",
               "Check the customer's billing/ledger history — recent charges, recharges, and any "
-              "unpaid invoices. Requires their phone number.",
-              dict(_IDENT_PHONE), ["identifier"]),
+              "unpaid invoices. Requires their phone number AND their NIC to verify identity first.",
+              dict(_IDENT_PHONE_VERIFIED), ["identifier", "nic"]),
         _tool("check_activation_history", "activation_history",
               "Look up everything the customer has activated/purchased over time on their line. "
-              "Requires their phone number.",
-              dict(_IDENT_PHONE), ["identifier"]),
+              "Requires their phone number AND their NIC to verify identity first.",
+              dict(_IDENT_PHONE_VERIFIED), ["identifier", "nic"]),
         _tool("list_my_tickets", "list_tickets",
               "List all support tickets/complaints logged for this customer's line, with current "
               "status — use when they ask what tickets they have open, not just one reference. "
-              "Requires their phone number.",
-              dict(_IDENT_PHONE), ["identifier"]),
+              "Requires their phone number AND their NIC to verify identity first.",
+              dict(_IDENT_PHONE_VERIFIED), ["identifier", "nic"]),
         _tool("recharge_balance", "recharge",
               "Top up / recharge the customer's prepaid balance. Confirm the exact amount with "
-              "the customer BEFORE calling this. Requires their phone number and the amount in LKR.",
-              {**_IDENT_PHONE, "amount": {"type": "number", "description": "Amount to add, in LKR"}},
-              ["identifier", "amount"], confirm=True),
+              "the customer BEFORE calling this. Requires their phone number, the amount in LKR, "
+              "AND their NIC to verify identity first.",
+              {**_IDENT_PHONE_VERIFIED, "amount": {"type": "number", "description": "Amount to add, in LKR"}},
+              ["identifier", "nic", "amount"], confirm=True),
         _tool("suspend_line", "suspend",
               "Suspend the customer's line, e.g. for a lost or stolen phone/SIM. Confirm with the "
-              "customer BEFORE calling this. Requires their phone number.",
-              dict(_IDENT_PHONE), ["identifier"], confirm=True),
+              "customer BEFORE calling this. Requires their phone number AND their NIC to verify "
+              "identity first.",
+              dict(_IDENT_PHONE_VERIFIED), ["identifier", "nic"], confirm=True),
         _tool("reactivate_line", "reactivate",
               "Reactivate a suspended line. Confirm with the customer BEFORE calling this. "
-              "Requires their phone number.",
-              dict(_IDENT_PHONE), ["identifier"], confirm=True),
+              "Requires their phone number AND their NIC to verify identity first.",
+              dict(_IDENT_PHONE_VERIFIED), ["identifier", "nic"], confirm=True),
         _tool("update_contact_info", "contact_update",
               "Update the customer's email and/or address on file. Confirm the exact new details "
-              "with the customer BEFORE calling this. Requires their phone number.",
-              {**_IDENT_PHONE,
+              "with the customer BEFORE calling this. Requires their phone number AND their NIC "
+              "to verify identity first.",
+              {**_IDENT_PHONE_VERIFIED,
                "email": {"type": "string", "description": "New email address, if changing"},
                "address": {"type": "string", "description": "New address, if changing"}},
-              ["identifier"], confirm=True),
+              ["identifier", "nic"], confirm=True),
     ],
     "university": [
         _tool("create_request", "ticket",
@@ -232,6 +251,25 @@ def _execute_telecom(db, client_slug: str, name: str, kind: str,
     from telecom_models import Plan, Ticket, PackageActivation
 
     identifier = (args.get("identifier") or "").strip()
+
+    # Identity verification gate — enforced here in code, not just left to the
+    # model's judgment (a tool schema saying "nic required" doesn't stop a model
+    # from calling it without one). Any kind that reveals or changes a specific
+    # customer's account data must pass this before doing anything else.
+    _SENSITIVE_KINDS = {
+        "account_lookup", "account_change", "activation", "call_history",
+        "billing_history", "activation_history", "list_tickets", "recharge",
+        "suspend", "reactivate", "contact_update",
+    }
+    if kind in _SENSITIVE_KINDS:
+        nic = (args.get("nic") or "").strip()
+        if not identifier or not nic:
+            return ("For your security, I need both the phone number and the NIC on file for "
+                    "this account before I can share or change anything on it.")
+        if not telecom_store.verify_identity(db, client_slug, identifier, nic):
+            return ("That NIC doesn't match our records for this line, so I can't share or "
+                    "change anything on it. Please double-check the NIC with the customer, or "
+                    "I can log a ticket / connect them with a human agent instead.")
 
     if kind == "account_lookup":
         if not identifier:
