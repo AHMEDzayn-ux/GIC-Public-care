@@ -10,8 +10,20 @@ services:
     # see comment in backend/Dockerfile.
     dockerfile_path: backend/Dockerfile
     http_port: 8080
-    instance_size_slug: basic-xs # ~1GB RAM - verify slug/price in the DO console, naming shifts over time
+    # basic-xs (1GB) OOM-killed the container while loading the embedding model
+    # during boot-time ingestion (scripts/ingest_gic.py runs before uvicorn starts,
+    # see Dockerfile CMD) - basic-s matches what nexus-backend already runs on.
+    instance_size_slug: basic-s
     instance_count: 1
+    health_check:
+      # Boot-time ingestion (embedding model load + indexing all GIC docs) takes
+      # longer than the default readiness-probe window, which caused DO to kill
+      # the container as unhealthy and auto-rollback before ingestion finished.
+      initial_delay_seconds: 300
+      period_seconds: 10
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
     envs:
       - key: ENVIRONMENT
         value: production
@@ -20,7 +32,7 @@ services:
         value: INFO
         scope: RUN_TIME
       - key: USE_RERANKING
-        value: "false" # 1GB is tight for both embedding + reranker models loaded together (~1.2-1.6GB combined) - flip to "true" if you upgrade to a 2GB+ instance
+        value: "false" # re-evaluate now that the instance has 2GB, but embedding + reranker together still hasn't been tested here
         scope: RUN_TIME
       - key: GROQ_API_KEY
         type: SECRET
