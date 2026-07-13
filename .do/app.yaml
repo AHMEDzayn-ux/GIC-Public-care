@@ -6,7 +6,8 @@ services:
       repo: AHMEDzayn-ux/GIC-Public-care
       branch: main
       deploy_on_push: true
-    source_dir: backend
+    # Root context (not source_dir: backend) so documents/gic/ ships in the image -
+    # see comment in backend/Dockerfile.
     dockerfile_path: backend/Dockerfile
     http_port: 8080
     instance_size_slug: basic-xs # ~1GB RAM - verify slug/price in the DO console, naming shifts over time
