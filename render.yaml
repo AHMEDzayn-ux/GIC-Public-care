@@ -11,7 +11,7 @@ services:
     staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
-        value: https://nexus-backend-7yq3e.ondigitalocean.app
+        value: https://gic-backend-8tdqd.ondigitalocean.app
     routes:
       - type: rewrite
         source: /*
