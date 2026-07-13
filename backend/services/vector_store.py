@@ -173,39 +173,49 @@ class VectorStoreService:
             'documents': [],
             'metadatas': [],
             'distances': [],
-            'ids': []
+            'ids': [],
+            # True positional index of each match within collection['documents']/
+            # ['metadatas'] - the same index space BM25 uses for its doc_ids
+            # (list(range(len(docs)))). Callers that fuse vector + BM25 results
+            # (e.g. RAGPipeline._retrieve_context) must key on THIS, not on a
+            # per-query rank/loop position, or the fusion silently merges
+            # unrelated documents.
+            'indices': []
         }
-        
+
         for i, query_indices in enumerate(indices):
             query_docs = []
             query_metas = []
             query_ids = []
             query_dists = []
-            
+            query_positions = []
+
             for j, idx in enumerate(query_indices):
                 if idx < len(collection['documents']):
                     metadata = collection['metadatas'][idx]
-                    
+
                     # Apply metadata filter if provided
                     if metadata_filter:
                         if not self._match_metadata_filter(metadata, metadata_filter):
                             continue
-                    
+
                     query_docs.append(collection['documents'][idx])
                     query_metas.append(metadata)
                     query_ids.append(collection['ids'][idx])
+                    query_positions.append(int(idx))
                     # Cast to native float — numpy float32 isn't JSON-serializable
                     # and downstream callers/tests expect Python floats.
                     query_dists.append(float(distances[i][j]))
-                    
+
                     # Stop once we have enough results
                     if len(query_docs) >= n_results:
                         break
-            
+
             results['documents'].append(query_docs)
             results['metadatas'].append(query_metas)
             results['distances'].append(query_dists)
             results['ids'].append(query_ids)
+            results['indices'].append(query_positions)
         
         filter_msg = f" with filter {metadata_filter}" if metadata_filter else ""
         logger.info(

@@ -424,4 +424,6 @@
     .message { max-width: 95%; }
     .btn-send span:last-child { display: none; }
     .btn-send { padding: 0 14px; }
+    .chat-header { flex-wrap: wrap; row-gap: 8px; }
+    .chat-controls { justify-content: flex-end; width: 100%; }
 }

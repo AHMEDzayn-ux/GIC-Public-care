@@ -52,14 +52,45 @@ const CustomerApp = () => {
     }
 
     const accent = config.accent_color || '#4f46e5';
+    const isGic = slug === 'gic';
 
     return (
         <div className="customer-app" style={{ '--accent': accent }}>
+            {isGic && (
+                <>
+                    <div className="gov-topbar">
+                        <div className="gov-topbar-inner">
+                            <span className="gov-topbar-title">
+                                <Icon name="landmark" size={13} />
+                                Government of Sri Lanka
+                            </span>
+                            <div className="gov-topbar-links">
+                                <a href="tel:1919" className="gov-topbar-link">
+                                    <Icon name="phone" size={13} />
+                                    Hotline 1919
+                                </a>
+                                <a
+                                    href="https://gic.gov.lk"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="gov-topbar-link gov-topbar-link-site"
+                                >
+                                    gic.gov.lk
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="gov-disclaimer-banner">
+                        <Icon name="alert" size={16} />
+                        <span>Not affiliated with or endorsed by the Government of Sri Lanka</span>
+                    </div>
+                </>
+            )}
             <header className="customer-header">
                 <div className="customer-header-inner">
                     <div className="customer-brand">
-                        <span className="customer-avatar" aria-hidden="true">
-                            <Icon name="sparkle" size={20} />
+                        <span className={`customer-avatar${isGic ? ' customer-avatar-gov' : ''}`} aria-hidden="true">
+                            <Icon name={isGic ? 'landmark' : 'sparkle'} size={20} />
                         </span>
                         <div className="customer-brand-text">
                             <h1>{config.bot_name || config.name}</h1>
@@ -75,6 +106,7 @@ const CustomerApp = () => {
                         {voiceOpen ? 'Chat' : 'Talk'}
                     </button>
                 </div>
+                {isGic && <div className="gov-ribbon" aria-hidden="true" />}
             </header>
             <div className="customer-chat">
                 {voiceOpen ? (

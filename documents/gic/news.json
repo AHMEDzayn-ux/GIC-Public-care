@@ -1,0 +1,44 @@
+[
+  {
+    "title": "ICTA Announces 2026 Digital Sovereignty Initiative",
+    "summary": "The Information and Communication Technology Agency (ICTA) has unveiled a comprehensive roadmap for 100% digital public services by year-end.",
+    "description": "ICTA 2026 initiative aims to integrate all government departments into a single unified digital identity system, ensuring seamless service delivery for every citizen.",
+    "url": "https://gic.gov.lk/news/icta-digitization-2026",
+    "category": "Government Update"
+  },
+  {
+    "title": "Online Passport Renewal Now Available",
+    "summary": "Citizens can now renew their passports entirely online through the new digital portal.",
+    "description": "The government has launched a new online portal for passport renewals, reducing wait times and eliminating the need for physical visits to specialized offices.",
+    "url": "https://gic.gov.lk/news/online-passport",
+    "category": "Services"
+  },
+  {
+    "title": "Unified Health App Launched for All Public Hospitals",
+    "summary": "A new mobile application now allows citizens to book appointments and view records across all major public hospitals.",
+    "description": "The Ministry of Health has introduced a first-of-its-kind mobile platform that synchronizes patient records between district and national hospitals, enabling better continuity of care.",
+    "url": "https://gic.gov.lk/news/national-health-app",
+    "category": "Services"
+  },
+  {
+    "title": "Digital Tax Filing for Small Businesses",
+    "summary": "A new simplified tax filing system has been launched for small and medium enterprises.",
+    "description": "Small and medium enterprises (SMEs) can now benefit from a streamlined digital tax filing system, making compliance easier and more efficient.",
+    "url": "https://gic.gov.lk/news/digital-tax-filing",
+    "category": "Services"
+  },
+  {
+    "title": "Government Announces Agri-Tech Modernization Subsidy",
+    "summary": "Farmers implementing smart irrigation and drone technology are now eligible for up to 50% state funding.",
+    "description": "To boost export quality and ensure food security, the Department of Agriculture is providing financial assistance for farmers who adopt modern agricultural technologies.",
+    "url": "https://gic.gov.lk/news/agri-tech-subsidy",
+    "category": "Business"
+  },
+  {
+    "title": "Extended Business License Renewal Period",
+    "summary": "The deadline for annual business license renewals has been extended by 30 days.",
+    "description": "Due to the implementation of new digital systems, the government has decided to extend the business license renewal period to ensure all businesses have sufficient time to transition.",
+    "url": "https://gic.gov.lk/news/business-license-renewal",
+    "category": "Business"
+  }
+]

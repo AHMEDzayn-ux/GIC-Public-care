@@ -58,3 +58,7 @@ pydantic-settings>=2.1.0
 
 # WhatsApp Integration
 requests>=2.31.0
+
+# Content ingestion (GIC pipeline) - HTML cleanup for scraped rich-text fields
+beautifulsoup4>=4.12.3
+html2text>=2024.2.26

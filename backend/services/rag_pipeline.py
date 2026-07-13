@@ -4,6 +4,7 @@ Orchestrates the complete RAG workflow: document processing, retrieval, and gene
 """
 
 import logging
+import re
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -162,6 +163,54 @@ class RAGPipeline:
 
     # ===================== AGENTIC ANSWERING =====================
 
+    _TITLE_MATCH_STOPWORDS = {
+        "a", "an", "the", "is", "are", "was", "were", "of", "for", "to", "in",
+        "on", "at", "how", "do", "does", "did", "i", "my", "me", "what", "who",
+        "can", "could", "would", "should", "will", "get", "got", "from",
+    }
+
+    @classmethod
+    def _title_words(cls, text: str) -> set:
+        return {
+            w for w in re.findall(r"[a-z]+", (text or "").lower())
+            if w not in cls._TITLE_MATCH_STOPWORDS and len(w) > 2
+        }
+
+    def _best_title_match(
+        self, query: str, candidates: List[Dict[str, Any]], min_score: float = 0.6
+    ) -> Optional[Dict[str, Any]]:
+        """Find the candidate whose own title/name most directly matches the
+        query's content words.
+
+        Embedding + reranking score a candidate's WHOLE body text, so a
+        precisely-labeled but short record can lose to a longer, keyword-dense
+        near-duplicate with a vaguer title (e.g. GIC has both "Obtain a
+        Certified Copy of the Certificate of Birth" - exact match, short body -
+        and "Make changes in the present birth certificate..." - generic
+        title, 4000-char body full of overlapping keywords). This is a
+        separate, literal "does this thing's own label say what was asked"
+        signal that isn't diluted by body length, used to guarantee a
+        strongly-matching label survives into the final results even if its
+        body scored lower on semantic/rerank grounds.
+        """
+        query_words = self._title_words(query)
+        if not query_words:
+            return None
+
+        best, best_score = None, 0.0
+        for cand in candidates:
+            title = (cand.get('metadata') or {}).get('title') or (cand.get('metadata') or {}).get('name')
+            if not title:
+                continue
+            title_words = self._title_words(title)
+            if not title_words:
+                continue
+            score = len(query_words & title_words) / len(query_words)
+            if score > best_score:
+                best, best_score = cand, score
+
+        return best if best_score >= min_score else None
+
     def _retrieve_context(
         self,
         query: str,
@@ -190,6 +239,11 @@ class RAGPipeline:
             texts = results['documents'][0]
             metas = (results.get('metadatas') or [[]])[0]
             dists = (results.get('distances') or [[]])[0]
+            # True collection-wide position of each match (NOT its rank in this
+            # result list) - must match BM25's doc_id space so hybrid fusion
+            # in RetrievalOptimizer._fuse_results merges the same document
+            # instead of silently combining unrelated ones.
+            positions = (results.get('indices') or [[]])[0]
 
             retrieved = []
             for i, text in enumerate(texts):
@@ -200,10 +254,15 @@ class RAGPipeline:
                     'text': text,
                     'metadata': meta,
                     'distance': float(dists[i]) if i < len(dists) else 0.0,
-                    'doc_id': i,
+                    'doc_id': positions[i] if i < len(positions) else i,
                 })
             if not retrieved:
                 return []
+
+            # Computed from the full initial candidate pool (not the narrowed
+            # `filtered`/reranked set) so a strong label match isn't excluded
+            # before we get a chance to guarantee it a slot below.
+            title_match = self._best_title_match(query, retrieved)
 
             # Relevance gate: if even the closest match is too far, nothing is relevant.
             best = min(d['distance'] for d in retrieved)
@@ -233,6 +292,12 @@ class RAGPipeline:
                     filtered = optimized
                 except Exception as e:
                     logger.warning(f"Optimization failed, using vector results: {e}")
+
+            # Guarantee a strongly label-matching candidate survives into the
+            # final results, even if hybrid/rerank scored its body lower than
+            # a longer, keyword-dense near-duplicate (see _best_title_match).
+            if title_match and not any(d.get('doc_id') == title_match.get('doc_id') for d in filtered):
+                filtered = [title_match] + filtered[:max(0, top_k - 1)]
 
             return filtered[:top_k]
         except Exception as e:
@@ -627,21 +692,23 @@ You are a customer-care agent. Operate by these principles:
         chunk_overlap: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
         use_parent_child: bool = False,
-        generate_qa_pairs: bool = False
+        generate_qa_pairs: bool = False,
+        json_text_fields: Optional[List[str]] = None,
+        json_metadata_fields: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Index documents into the vector store with advanced strategies.
-        
+
         Supports:
         - PDF files (.pdf) - Text extraction and chunking
         - JSON files (.json) - Customer care FAQs, packages, catalogs
-        
+
         Complete workflow:
         1. Load documents and chunk text (auto-detects PDF vs JSON)
         2. Generate QA pairs if enabled (for better search alignment)
         3. Generate embeddings for chunks/questions
         4. Store in vector database with rich metadata
-        
+
         Args:
             pdf_paths: Legacy parameter - List of PDF file paths (deprecated, use file_paths)
             file_paths: List of file paths to index (PDF or JSON)
@@ -650,7 +717,12 @@ You are a customer-care agent. Operate by these principles:
             metadata: Additional metadata to attach to all documents
             use_parent_child: Use parent-child chunking strategy (PDF only)
             generate_qa_pairs: Generate hypothetical QA pairs for better search
-        
+            json_text_fields: For JSON files, explicit field names to embed as
+                searchable text (bypasses auto-detection, which can misclassify
+                short-looking-but-actually-long fields like URLs)
+            json_metadata_fields: For JSON files, explicit field names to attach
+                as metadata only (not embedded)
+
         Returns:
             Dictionary with indexing statistics
         """
@@ -675,7 +747,12 @@ You are a customer-care agent. Operate by these principles:
                 
                 if file_ext == '.json':
                     # JSON files: Direct chunking (no parent-child or QA generation yet)
-                    chunks = self.doc_loader.load_and_chunk_json(file_path, metadata=metadata)
+                    chunks = self.doc_loader.load_and_chunk_json(
+                        file_path,
+                        metadata=metadata,
+                        text_fields=json_text_fields,
+                        metadata_fields=json_metadata_fields
+                    )
                     logger.info(f"Loaded JSON: {len(chunks)} chunks created")
                     
                 elif file_ext == '.pdf':
@@ -949,18 +1026,22 @@ You are a customer-care agent. Operate by these principles:
             # Extract retrieved documents
             retrieved_docs = []
             if results['documents'] and len(results['documents']) > 0:
+                positions = (results.get('indices') or [[]])[0]
                 for i, doc in enumerate(results['documents'][0]):
                     doc_metadata = results['metadatas'][0][i]
-                    
+
                     # Skip questions, retrieve original content
                     if doc_metadata.get('content_type') == 'question':
                         continue
-                    
+
                     retrieved_docs.append({
                         'text': doc,
                         'metadata': doc_metadata,
                         'distance': results['distances'][0][i],
-                        'doc_id': i  # Track original position
+                        # True collection position (matches BM25's doc_id space) -
+                        # NOT the loop index, or hybrid fusion silently merges
+                        # unrelated documents (see VectorStoreService.query).
+                        'doc_id': positions[i] if i < len(positions) else i
                     })
             
             logger.info(f"Retrieved {len(retrieved_docs)} candidates from vector search")
@@ -1446,12 +1527,15 @@ You are a customer-care agent. Operate by these principles:
                     # Extract context
                     if results and results.get('documents') and len(results['documents']) > 0 and results['documents'][0]:
                         context = results['documents'][0]
+                        positions = (results.get('indices') or [[]])[0]
                         retrieved_docs = [
                             {
                                 'text': doc,
                                 'metadata': results['metadatas'][0][i] if results.get('metadatas') else {},
                                 'distance': results['distances'][0][i] if results.get('distances') else 0,
-                                'doc_id': i
+                                # True collection position (matches BM25's doc_id
+                                # space) - see VectorStoreService.query.
+                                'doc_id': positions[i] if i < len(positions) else i
                             }
                             for i, doc in enumerate(context)
                             if not results['metadatas'][0][i].get('content_type') == 'question'  # Skip questions

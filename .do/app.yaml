@@ -1,9 +1,9 @@
-name: nexus-backend
+name: gic-backend
 region: nyc
 services:
   - name: backend
     github:
-      repo: AHMEDzayn-ux/RAG-new
+      repo: AHMEDzayn-ux/GIC-Public-care
       branch: main
       deploy_on_push: true
     source_dir: backend
