@@ -305,9 +305,13 @@ const VoiceCall = ({ slug, accentColor = '#4f46e5', onClose }) => {
                 const level = rms();
                 frame += 1;
 
-                // Half-duplex: while the assistant is speaking/thinking, don't listen
-                // (kills the speaker→mic feedback loop). Abandon any tentative capture.
-                if (suppressRef.current) {
+                // Half-duplex ONLY while thinking/connecting — then there's nothing to
+                // barge into and listening would just capture the STT gap. While the
+                // assistant is SPEAKING we keep the mic live so the user can talk over
+                // it (barge-in); the stricter threshold below stops the assistant's own
+                // (echo-cancelled) audio from false-triggering an interruption.
+                const speakingNow = statusRef.current === 'speaking';
+                if (suppressRef.current && !speakingNow) {
                     if (phase !== 'idle') { phase = 'idle'; loudFrames = 0; confirmed = false; stopRecorder(); }
                     if (frame % 3 === 0) setMicLevel(0);
                     return;
@@ -316,8 +320,11 @@ const VoiceCall = ({ slug, accentColor = '#4f46e5', onClose }) => {
                 if (frame % 3 === 0) setMicLevel(Math.min(100, Math.round(level * 350)));
 
                 const now = performance.now();
-                const preThresh = Math.max(0.022, noiseFloor * 2.2);   // low: catch word onset
-                const confirmThresh = Math.max(0.038, noiseFloor * 3.4); // high: real speech
+                // During playback require LOUDER, more sustained speech to barge in, so
+                // residual echo after AEC can't interrupt the assistant by itself.
+                const barge = speakingNow ? 1.6 : 1.0;
+                const preThresh = Math.max(0.022, noiseFloor * 2.2) * barge;   // low: catch word onset
+                const confirmThresh = Math.max(0.038, noiseFloor * 3.4) * barge; // high: real speech
                 const endThresh = Math.max(0.024, noiseFloor * 2.0);
 
                 if (phase === 'idle') {
@@ -334,7 +341,10 @@ const VoiceCall = ({ slug, accentColor = '#4f46e5', onClose }) => {
                     // Require SUSTAINED loudness to confirm — a tap is 1-2 frames and won't qualify.
                     if (level > confirmThresh) { loudFrames += 1; lastLoud = now; }
                     else { loudFrames = Math.max(0, loudFrames - 1); }
-                    if (loudFrames >= CONFIRM_FRAMES) {
+                    // Interrupting mid-playback needs a touch more sustained speech than
+                    // a normal turn, so a stray echo blip can't cut the assistant off.
+                    const confirmNeeded = speakingNow ? CONFIRM_FRAMES + 3 : CONFIRM_FRAMES;
+                    if (loudFrames >= confirmNeeded) {
                         phase = 'speech';
                         confirmed = true;
                         speechStartAt = preStartAt;   // count from the onset we already captured

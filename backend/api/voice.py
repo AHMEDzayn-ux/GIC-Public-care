@@ -555,19 +555,40 @@ async def _handle_utterance(websocket, pipeline, slug, session_id, history,
     buf = ""          # tokens not yet formed into a complete sentence
     seq = 0           # audio chunk ordering for the client's playback queue
     result = None
+    cancelled = False
     while True:
+        if cancel_event.is_set():
+            cancelled = True
+            break
         ev = await run_in_threadpool(next, gen, _STREAM_END)
         if ev is _STREAM_END:
             break
         if ev[0] == "token":
             if cancel_event.is_set():
-                continue  # barge-in: keep draining the generator, just stop speaking
+                cancelled = True
+                break
             buf += ev[1]
             sentences, buf = _take_ready_sentences(buf)
             for s in sentences:
+                if cancel_event.is_set():
+                    cancelled = True
+                    break
                 seq = await _speak_sentence(websocket, s, seq, cancel_event, voice)
+            if cancelled:
+                break
         elif ev[0] == "final":
             result = ev[1]
+
+    if cancelled:
+        # Barge-in: abandon the interrupted turn immediately so the user's new
+        # utterance (already on its way) is handled without waiting for the rest of
+        # this answer to generate. Close the generator to release the LLM stream.
+        try:
+            await run_in_threadpool(gen.close)
+        except Exception:
+            pass
+        return
+
     # Flush the tail (the last sentence usually has no trailing whitespace).
     if buf.strip() and not cancel_event.is_set():
         seq = await _speak_sentence(websocket, buf, seq, cancel_event, voice)
