@@ -77,6 +77,8 @@ if settings.environment == "production":
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=[
+            # Cloud Run (GCP) — the live host, e.g. gic-backend-xxxx-uc.a.run.app
+            "*.run.app", "*.a.run.app",
             "api.yourdomain.com", "*.onrender.com", "*.hf.space", "*.ondigitalocean.app",
             "localhost", "127.0.0.1",
         ]
