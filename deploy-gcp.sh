@@ -21,7 +21,8 @@ set -euo pipefail
 
 # ---- Config (edit these if you move projects/regions) ---------------------
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
-REGION="${REGION:-us-central1}"
+# Mumbai: closest region to Sri Lanka users (~40-60ms vs ~250ms from us-central1).
+REGION="${REGION:-asia-south1}"
 SERVICE="${SERVICE:-gic-backend}"
 REPO="gic"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/backend:$(date +%Y%m%d-%H%M%S)"
@@ -57,6 +58,7 @@ gcloud run deploy "$SERVICE" \
   --max-instances 3 \
   --timeout 600 \
   --concurrency 40 \
+  --no-cpu-throttling \
   --startup-probe "tcpSocket.port=8080,periodSeconds=30,failureThreshold=20,timeoutSeconds=5" \
   --set-env-vars "ENVIRONMENT=production,LOG_LEVEL=INFO,USE_RERANKING=true" \
   --set-secrets "GROQ_API_KEY=GROQ_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,ADMIN_PASSWORD=ADMIN_PASSWORD:latest,JWT_SECRET=JWT_SECRET:latest,ADMIN_EMAIL=ADMIN_EMAIL:latest"
