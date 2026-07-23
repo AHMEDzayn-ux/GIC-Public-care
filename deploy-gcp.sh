@@ -58,7 +58,7 @@ gcloud run deploy "$SERVICE" \
   --timeout 600 \
   --concurrency 40 \
   --startup-probe "tcpSocket.port=8080,periodSeconds=30,failureThreshold=20,timeoutSeconds=5" \
-  --set-env-vars "ENVIRONMENT=production,LOG_LEVEL=INFO,USE_RERANKING=false" \
+  --set-env-vars "ENVIRONMENT=production,LOG_LEVEL=INFO,USE_RERANKING=true" \
   --set-secrets "GROQ_API_KEY=GROQ_API_KEY:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,ADMIN_PASSWORD=ADMIN_PASSWORD:latest,JWT_SECRET=JWT_SECRET:latest,ADMIN_EMAIL=ADMIN_EMAIL:latest"
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
