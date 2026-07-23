@@ -623,7 +623,197 @@ You are a customer-care agent. Operate by these principles:
             'escalated': escalated,
             'no_kb_match': search_attempted and not collected,
         }
-    
+
+    def agent_chat_stream(
+        self,
+        message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        top_k: int = 4,
+        max_iterations: int = 3,
+        session_id: Optional[str] = None,
+    ):
+        """Streaming twin of agent_chat, for the voice pipeline.
+
+        A generator that yields ('token', delta) events as the FINAL answer is
+        produced, then a single ('final', result_dict) with the same shape
+        agent_chat returns. Retrieval, tool calls, reranking and the emotion /
+        escalation logic are identical to agent_chat — only the user-facing
+        answer generation is streamed, so TTS can start speaking the first
+        sentence instead of waiting for the whole reply.
+        """
+        conversation_history = conversation_history or []
+        if self.llm_service.llm is None:
+            yield ('final', {'answer': "The assistant is temporarily unavailable.", 'sources': [],
+                             'used_retrieval': False, 'emotion': {'emotion': 'neutral', 'intensity': 1},
+                             'escalated': False})
+            return
+
+        if self._is_smalltalk(message) or not self._needs_emotion_check(message):
+            emotion = {"emotion": "neutral", "intensity": 1, "wants_human": False}
+        else:
+            emotion = self.llm_service.detect_emotion(message)
+
+        raw_result: Optional[Dict[str, Any]] = None
+        emitted_any = False
+        try:
+            for ev in self._run_agent_loop_stream(
+                message, conversation_history, top_k, max_iterations, emotion, session_id
+            ):
+                if ev[0] == 'token':
+                    emitted_any = True
+                    yield ev
+                elif ev[0] == 'final':
+                    raw_result = ev[1]
+        except Exception as e:
+            logger.warning(f"Agent stream failed ({e}); using direct fallback")
+            # Only fall back if we haven't already spoken part of a streamed answer,
+            # so the customer never hears two overlapping replies.
+            if not emitted_any:
+                raw_result = self._fallback_answer(message, conversation_history, top_k)
+                yield ('token', raw_result.get('answer', ''))
+
+        result = raw_result or {'answer': '', 'sources': [], 'used_retrieval': False}
+        result['emotion'] = emotion
+        result.setdefault('escalated', False)
+        result.setdefault('no_kb_match', False)
+
+        # Same safety net as agent_chat: an explicit request for a human always
+        # creates a handoff even if the model didn't call the escalate tool.
+        if emotion.get('wants_human') and not result.get('escalated'):
+            self._record_escalation(
+                reason="Customer explicitly requested a human agent",
+                summary=f"Customer asked to speak with a human. Latest message: {message}",
+                emotion=emotion,
+                conversation_history=conversation_history,
+                message=message,
+            )
+            result['escalated'] = True
+
+        yield ('final', result)
+
+    def _run_agent_loop_stream(
+        self,
+        message: str,
+        conversation_history: List[Dict[str, str]],
+        top_k: int,
+        max_iterations: int,
+        emotion: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+    ):
+        """Streaming twin of _run_agent_loop. Yields ('token', delta) for the
+        answer turn and a final ('final', result_dict). A model turn is either a
+        tool call OR a spoken answer; these models emit tool-call structure at the
+        very start of a turn, so once content tokens arrive with no tool call
+        forming we can safely stream them straight to speech."""
+        from services import actions
+        domain = getattr(self, "domain", "generic")
+        llm_with_tools = self.llm_service.llm.bind_tools(
+            [self._AGENT_TOOLS[0], self._ESCALATE_TOOL] + actions.get_action_tools(domain)
+        )
+        system_prompt = self._agent_system_prompt() + self._mood_directive(emotion)
+
+        messages: List[Any] = [SystemMessage(content=system_prompt)]
+        for m in conversation_history[-6:]:
+            role, content = m.get('role'), m.get('content', '')
+            if role == 'user':
+                messages.append(HumanMessage(content=content))
+            elif role == 'assistant':
+                messages.append(AIMessage(content=content))
+        messages.append(HumanMessage(content=message))
+
+        collected: List[Dict[str, Any]] = []
+        escalated = False
+        search_attempted = False
+
+        for _ in range(max_iterations):
+            gathered = None
+            streamed_text = ""
+            saw_tool = False
+            for chunk in llm_with_tools.stream(messages):
+                gathered = chunk if gathered is None else gathered + chunk
+                if getattr(chunk, "tool_call_chunks", None):
+                    saw_tool = True
+                delta = self._msg_text(chunk.content)
+                if delta and not saw_tool:
+                    streamed_text += delta
+                    yield ('token', delta)
+
+            tool_calls = (getattr(gathered, 'tool_calls', None) or []) if gathered is not None else []
+
+            if not tool_calls:
+                # Answer turn — the tokens above were the reply. The final dict
+                # carries the citation-cleaned text for display/history; the spoken
+                # audio used the raw stream (cleaning only strips meta-phrases).
+                answer = streamed_text.strip() or self._msg_text(
+                    getattr(gathered, 'content', '') if gathered is not None else ''
+                ).strip()
+                if not answer:
+                    # Streaming yielded no content for the answer turn (rare provider
+                    # quirk) — recover with a plain invoke and speak it in one go so
+                    # the caller never gets silence.
+                    recovered = self.llm_service.llm.invoke(messages)
+                    answer = self._msg_text(recovered.content).strip() or "Could you rephrase that?"
+                    yield ('token', answer)
+                yield ('final', {
+                    'answer': self.llm_service._clean_citation_phrases(answer),
+                    'sources': self._format_sources_for_citations(collected) if collected else [],
+                    'used_retrieval': bool(collected),
+                    'escalated': escalated,
+                    'no_kb_match': search_attempted and not collected,
+                })
+                return
+
+            messages.append(gathered)
+            for tc in tool_calls:
+                name = tc.get('name')
+                args = tc.get('args', {}) or {}
+                tc_id = tc.get('id')
+                if name == 'search_knowledge_base':
+                    search_attempted = True
+                    q = (args.get('query') or message).strip()
+                    docs = self._retrieve_context(q, top_k=top_k)
+                    collected.extend(docs)
+                    if docs:
+                        tool_text = "\n\n---\n\n".join(d['text'] for d in docs)
+                    else:
+                        tool_text = "No relevant information was found in the knowledge base for this query."
+                    messages.append(ToolMessage(content=tool_text, tool_call_id=tc_id))
+                elif name == 'escalate_to_human':
+                    reason = (args.get('reason') or "Customer needs human assistance").strip()
+                    summary = (args.get('summary') or "").strip()
+                    self._record_escalation(reason, summary, emotion, conversation_history, message)
+                    escalated = True
+                    messages.append(ToolMessage(
+                        content=("Escalation created — a human agent has been notified and will follow up. "
+                                 "Warmly reassure the customer that a human will reach out."),
+                        tool_call_id=tc_id,
+                    ))
+                elif actions.is_action(domain, name):
+                    result_text = actions.execute_action(
+                        self.client_slug, session_id, name, args, domain
+                    )
+                    messages.append(ToolMessage(content=result_text, tool_call_id=tc_id))
+                else:
+                    messages.append(ToolMessage(content="Unknown tool.", tool_call_id=tc_id))
+
+        # Hit the iteration cap — force a final answer, streamed.
+        gathered = None
+        streamed_text = ""
+        for chunk in self.llm_service.llm.stream(messages):
+            gathered = chunk if gathered is None else gathered + chunk
+            delta = self._msg_text(chunk.content)
+            if delta:
+                streamed_text += delta
+                yield ('token', delta)
+        answer = streamed_text.strip() or "Let me connect you with a human agent."
+        yield ('final', {
+            'answer': self.llm_service._clean_citation_phrases(answer),
+            'sources': self._format_sources_for_citations(collected) if collected else [],
+            'used_retrieval': bool(collected),
+            'escalated': escalated,
+            'no_kb_match': search_attempted and not collected,
+        })
+
     def draft_kb_entry(self, questions: List[str]) -> Dict[str, str]:
         """Draft a KB card answering a cluster of unanswered questions (on-demand LLM call).
 

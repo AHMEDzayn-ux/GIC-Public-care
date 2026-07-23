@@ -461,6 +461,71 @@ async def _speak(websocket, text: str, cancel_event: Optional[asyncio.Event] = N
             await websocket.send_json({"type": "speak_text", "seq": seq, "text": chunk})
 
 
+# One complete sentence = text up to a terminator (.!?। or newline) FOLLOWED by
+# whitespace, so decimals like "3.5" and abbreviations mid-flow don't split early.
+_STREAM_SENT_RE = re.compile(r"^(.*?[.!?।])\s", re.DOTALL)
+
+
+def _take_ready_sentences(buf: str, hard_len: int = 200):
+    """Pull complete sentences out of a growing token buffer for streaming TTS.
+    Returns (sentences, remainder). The trailing partial sentence (no terminator
+    yet) stays in `buf` until more tokens arrive or the caller flushes it at the
+    end. Long unpunctuated runs flush at a word boundary past `hard_len` so audio
+    never stalls waiting for punctuation."""
+    out: list[str] = []
+    while buf:
+        nl = buf.find("\n")
+        m = _STREAM_SENT_RE.match(buf)
+        cut = m.end(1) if m else None
+        if nl != -1 and (cut is None or nl < cut):
+            seg = buf[:nl].strip()
+            buf = buf[nl + 1:]
+            if seg:
+                out.append(seg)
+            continue
+        if cut is not None:
+            seg = buf[:cut].strip()
+            buf = buf[cut:].lstrip()
+            if seg:
+                out.append(seg)
+            continue
+        if len(buf) > hard_len:
+            sp = buf.rfind(" ", 0, hard_len)
+            if sp > 40:
+                seg = buf[:sp].strip()
+                buf = buf[sp + 1:]
+                if seg:
+                    out.append(seg)
+                continue
+        break
+    return out, buf
+
+
+async def _speak_sentence(websocket, text: str, seq: int,
+                          cancel_event: Optional[asyncio.Event], voice: Optional[str]) -> int:
+    """Synthesize and stream ONE sentence, returning the next seq number. Used by
+    the streaming turn handler so each sentence is spoken the moment it's ready."""
+    text = _strip_markdown(text)
+    if not text.strip():
+        return seq
+    if cancel_event is not None and cancel_event.is_set():
+        return seq
+    speak_voice = _pick_voice(text, voice)
+    audio_bytes, mime = await synthesize(text, speak_voice)
+    if cancel_event is not None and cancel_event.is_set():
+        return seq
+    if audio_bytes:
+        await websocket.send_json({"type": "audio_meta", "seq": seq, "mime": mime})
+        await websocket.send_bytes(audio_bytes)
+    else:
+        await websocket.send_json({"type": "speak_text", "seq": seq, "text": text})
+    return seq + 1
+
+
+# Sentinel marking the end of the pipeline's streaming generator.
+_STREAM_END = object()
+
+
 async def _handle_utterance(websocket, pipeline, slug, session_id, history,
                             audio: bytes, cancel_event: asyncio.Event,
                             voice: Optional[str] = None, stt_prompt: Optional[str] = None,
@@ -482,34 +547,52 @@ async def _handle_utterance(websocket, pipeline, slug, session_id, history,
     if cancel_event.is_set():
         return
 
-    # 2. The brain (agent_chat is sync -> run off the event loop)
-    result = await run_in_threadpool(
-        pipeline.agent_chat, user_text, list(history), 4, session_id=session_id
-    )
+    # 2-3. The brain — STREAMED. agent_chat_stream is a sync generator; step it
+    #      off the event loop and speak each sentence the instant it completes, so
+    #      the caller hears audio after ~one sentence of generation instead of
+    #      after the whole answer (this is what makes it feel real-time).
+    gen = pipeline.agent_chat_stream(user_text, list(history), 4, session_id=session_id)
+    buf = ""          # tokens not yet formed into a complete sentence
+    seq = 0           # audio chunk ordering for the client's playback queue
+    result = None
+    while True:
+        ev = await run_in_threadpool(next, gen, _STREAM_END)
+        if ev is _STREAM_END:
+            break
+        if ev[0] == "token":
+            if cancel_event.is_set():
+                continue  # barge-in: keep draining the generator, just stop speaking
+            buf += ev[1]
+            sentences, buf = _take_ready_sentences(buf)
+            for s in sentences:
+                seq = await _speak_sentence(websocket, s, seq, cancel_event, voice)
+        elif ev[0] == "final":
+            result = ev[1]
+    # Flush the tail (the last sentence usually has no trailing whitespace).
+    if buf.strip() and not cancel_event.is_set():
+        seq = await _speak_sentence(websocket, buf, seq, cancel_event, voice)
+
+    if result is None:
+        result = {"answer": "", "sources": [], "used_retrieval": False,
+                  "emotion": {"emotion": "neutral", "intensity": 1}, "escalated": False}
     answer = result.get("answer", "") or "Sorry, I didn't catch that."
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": answer})
 
-    # 3. Persist the turn in the BACKGROUND (off the event loop). The DB write is
-    #    blocking, so running it inline here — before speaking — would both delay
-    #    time-to-first-audio and stall the event loop for every connection. Fire
-    #    it into the threadpool so it overlaps with TTS; await it at the very end.
+    # Persist the turn in the BACKGROUND (blocking DB write) so it overlaps with
+    # the tail of synthesis; awaited at the very end.
     log_task = asyncio.create_task(
         run_in_threadpool(_log_turn, slug, session_id, user_text, result)
     )
 
-    # Speak/display plain text (no markdown symbols read aloud).
-    spoken = _strip_markdown(answer)
-    emotion = (result.get("emotion") or {}).get("emotion")
+    # Send the full answer text once, for the transcript panel (audio already
+    # streamed above). emotion/escalation ride along for the UI.
     await websocket.send_json({
         "type": "answer",
-        "text": spoken,
+        "text": _strip_markdown(answer),
         "escalated": bool(result.get("escalated", False)),
-        "emotion": emotion,
+        "emotion": (result.get("emotion") or {}).get("emotion"),
     })
-
-    # 4. Speak it (consistent voice via _speak).
-    await _speak(websocket, spoken, cancel_event, voice)
 
     await websocket.send_json({"type": "done"})
 
